@@ -11,6 +11,12 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 - ✔ Réguler automatiquement le débit d’air via airFlowMultiplier (sans capteur de pression).
 - ✔ Permettre le passage entre accords majeurs et mineurs via CC MIDI.
 
+## Schema de principe
+
+![schematics of the idea](https://github.com/glloq/Accordion-servo-midi/blob/main/img/schemas%20principe.png)
+
+
+
 ## 📌 Matériel
 ### 🔹 Électronique
 - Arduino Leonardo / Micro	=> Reçoit les messages MIDI et contrôle les moteurs
