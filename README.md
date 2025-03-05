@@ -3,8 +3,8 @@
 Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
 
 > [!NOTE]
->  je traville avec un viel accordeon recupéré qui ne fonctionne plus
->  l'accordeon a pris chaud, il y a des morceaux de cire partout et les anches ne tienent plus => Ca va me prendre du temps a remettre en etat avant de pouvoir tester :/
+>  je traville avec un viel accordeon recupéré qui ne fonctionne plus, 
+>  il a pris chaud (probablement dans une voiture), il y a des morceaux de cire partout et les anches ne tienent plus => Ca va me prendre du temps a remettre en etat avant de pouvoir tester :/
 
 ## 📌 Objectif
 
