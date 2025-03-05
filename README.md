@@ -14,7 +14,7 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 - ✔ Simuler le jeu d’un accordéoniste avec un soufflet dynamique.
 - ✔ Gérer les notes et accords de la main droite et de la main gauche.
 - ✔ Réguler automatiquement le débit d’air via airFlowMultiplier (sans capteur de pression).
-- ✔ Permettre le passage entre accords majeurs et mineurs via CC MIDI.
+
 
 ## Schema de principe
 
@@ -69,61 +69,6 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 | **Rangée Aiguë**       | **48** | **55** | **50** | **57** | **52** | **59** | **54** | **61** | **56** | **63** | **58** | **53** |
 
 
- #### Tableau des Combinaisons d'Accords pour les 24 Servomoteurs
- 
-> [!IMPORTANT]
-> les differents acords devrons etre géré sur le fichier midi => ca utilise trop de memoire
-
-
-| **Servo ID** | **Basse Simple (1 Servo Actif)** | **Accord Majeur (3 Servos Actifs)** | **Accord Mineur (3 Servos Actifs)** | **Accord 7ème (4 Servos Actifs)** | **Accord Diminué (3 Servos Actifs)** | **Accord Augmenté (3 Servos Actifs)** | **Accord à 2 Notes (Fondamentale + Quinte)** |
-|-------------|-------------|-------------------------|-------------------------|------------------------|--------------------------|--------------------------|----------------------------------|
-| 1  | 50  | 50 - 54 - 57  | 50 - 53 - 57  | 50 - 54 - 57 - 60  | 50 - 53 - 56  | 50 - 54 - 58  | 50 - 57 |
-| 2  | 49  | 49 - 53 - 56  | 49 - 52 - 56  | 49 - 53 - 56 - 59  | 49 - 52 - 55  | 49 - 53 - 57  | 49 - 56 |
-| 3  | 48  | 48 - 52 - 55  | 48 - 51 - 55  | 48 - 52 - 55 - 58  | 48 - 51 - 54  | 48 - 52 - 56  | 48 - 55 |
-| 4  | 47  | 47 - 51 - 54  | 47 - 50 - 54  | 47 - 51 - 54 - 57  | 47 - 50 - 53  | 47 - 51 - 55  | 47 - 54 |
-| 5  | 46  | 46 - 50 - 53  | 46 - 49 - 53  | 46 - 50 - 53 - 56  | 46 - 49 - 52  | 46 - 50 - 54  | 46 - 53 |
-| 6  | 45  | 45 - 49 - 52  | 45 - 48 - 52  | 45 - 49 - 52 - 55  | 45 - 48 - 51  | 45 - 49 - 53  | 45 - 52 |
-| 7  | 44  | 44 - 48 - 51  | 44 - 47 - 51  | 44 - 48 - 51 - 54  | 44 - 47 - 50  | 44 - 48 - 52  | 44 - 51 |
-| 8  | 43  | 43 - 47 - 50  | 43 - 46 - 50  | 43 - 47 - 50 - 53  | 43 - 46 - 49  | 43 - 47 - 51  | 43 - 50 |
-| 9  | 42  | 42 - 46 - 49  | 42 - 45 - 49  | 42 - 46 - 49 - 52  | 42 - 45 - 48  | 42 - 46 - 50  | 42 - 49 |
-| 10 | 41  | 41 - 45 - 48  | 41 - 44 - 48  | 41 - 45 - 48 - 51  | 41 - 44 - 47  | 41 - 45 - 49  | 41 - 48 |
-| 11 | 40  | 40 - 44 - 47  | 40 - 43 - 47  | 40 - 44 - 47 - 50  | 40 - 43 - 46  | 40 - 44 - 48  | 40 - 47 |
-| 12 | 39  | 39 - 43 - 46  | 39 - 42 - 46  | 39 - 43 - 46 - 49  | 39 - 42 - 45  | 39 - 43 - 47  | 39 - 46 |
-| 13 | 62  | 62 - 66 - 69  | 62 - 65 - 69  | 62 - 66 - 69 - 72  | 62 - 65 - 68  | 62 - 66 - 70  | 62 - 69 |
-| 14 | 61  | 61 - 65 - 68  | 61 - 64 - 68  | 61 - 65 - 68 - 71  | 61 - 64 - 67  | 61 - 65 - 69  | 61 - 68 |
-| 15 | 60  | 60 - 64 - 67  | 60 - 63 - 67  | 60 - 64 - 67 - 70  | 60 - 63 - 66  | 60 - 64 - 68  | 60 - 67 |
-| 16 | 59  | 59 - 63 - 66  | 59 - 62 - 66  | 59 - 63 - 66 - 69  | 59 - 62 - 65  | 59 - 63 - 67  | 59 - 66 |
-| 17 | 58  | 58 - 62 - 65  | 58 - 61 - 65  | 58 - 62 - 65 - 68  | 58 - 61 - 64  | 58 - 62 - 66  | 58 - 65 |
-| 18 | 57  | 57 - 61 - 64  | 57 - 60 - 64  | 57 - 61 - 64 - 67  | 57 - 60 - 63  | 57 - 61 - 65  | 57 - 64 |
-| 19 | 56  | 56 - 60 - 63  | 56 - 59 - 63  | 56 - 60 - 63 - 66  | 56 - 59 - 62  | 56 - 60 - 64  | 56 - 63 |
-| 20 | 55  | 55 - 59 - 62  | 55 - 58 - 62  | 55 - 59 - 62 - 65  | 55 - 58 - 61  | 55 - 59 - 63  | 55 - 62 |
-| 21 | 54  | 54 - 58 - 61  | 54 - 57 - 61  | 54 - 58 - 61 - 64  | 54 - 57 - 60  | 54 - 58 - 62  | 54 - 61 |
-| 22 | 53  | 53 - 57 - 60  | 53 - 56 - 60  | 53 - 57 - 60 - 63  | 53 - 56 - 59  | 53 - 57 - 61  | 53 - 60 |
-| 23 | 52  | 52 - 56 - 59  | 52 - 55 - 59  | 52 - 56 - 59 - 62  | 52 - 55 - 58  | 52 - 56 - 60  | 52 - 59 |
-| 24 | 51  | 51 - 55 - 58  | 51 - 54 - 58  | 51 - 55 - 58 - 61  | 51 - 54 - 57  | 51 - 55 - 59  | 51 - 58 |
-
----
-
-### Explication
-- **Chaque servomoteur active une seule note MIDI pour une basse simple.**
-- **Les accords sont joués en combinant plusieurs servomoteurs.**
-- **Accords Majeurs et Mineurs utilisent 3 servos, les accords 7ème en utilisent 4.**
-- **Les accords à 2 notes (fondamentale + quinte) utilisent 2 servos.**
-
-
-## 🎛️ **Gestion MIDI**
-| **Type de Note** | **Canal MIDI** | **Control Change (CC)** |
-|-----------------|--------------|--------------------|
-| **Basses Simples (24 notes)** | **Canal 2** | `CC 65 = 0` |
-| **Accords Majeurs (36 notes)** | **Canal 2** | `CC 65 = 127`, `CC 64 = 0` |
-| **Accords Mineurs (36 notes)** | **Canal 2** | `CC 65 = 127`, `CC 64 = 127` |
-| **Accords à 2 Notes (Fondamentale + Quinte)** | **Canal 2** | `CC 66 = 127` |
-| **Accords 7ème (Dominante 7)** | **Canal 2** | `CC 67 = 127` |
-| **Accords Diminués** | **Canal 2** | `CC 68 = 127` |
-| **Accords Augmentés** | **Canal 2** | `CC 69 = 127` |
-
-
-
 ## 📌 Gestion du Débit d’Air et du Soufflet
 
 - ✔ Chaque note a un airFlowMultiplier (les graves consomment plus d'air).
@@ -146,11 +91,5 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 
 -  Fins de course physiques ou optiques.
 
-## 📌 Optimisation des Performances
-
-- ✔ Servos désactivés dynamiquement si inutilisés (OE des PCA9685).
-- ✔ Alimentation optimisée pour éviter de surcharger le circuit 5V.
-- ✔ Interpolation des commandes MIDI pour adoucir les transitions.
-- ✔ Mode silencieux du TMC2209 (StealthChop) activé.
 
 
