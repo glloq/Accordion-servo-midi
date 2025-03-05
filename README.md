@@ -1,6 +1,11 @@
 # 🎵 Accordion-Servo-MIDI 🎵
 
 Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
+
+> [!NOTE]
+>  je traville avec un viel accordeon recupéré qui ne fonctionne plus
+>  l'accordeon a pris chaud, il y a des morceaux de cire et les anches ne tienent plus => Ca va me prendre du temps a remettre en etat avant de pouvoir tester :/
+
 ## 📌 Objectif
 
 Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par des servomoteurs et un moteur pas à pas, permettant de :
@@ -40,21 +45,14 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 ## 📌 Logique du Code
 ### 🔹 Modules Principaux
 
-MIDI Handler	=> Reçoit les messages MIDI via USB
+- MIDI Handler	=> Reçoit les messages MIDI via USB  
+- Instrument Controller	=> Interprète les notes et attribut les notes aux mains droite et gauche et gere le mouvement du soufflet
+- LeftHandController => gere les notes pour le canal midi 1 de la main gauche
+- RightHandControlelr => gere les notes pour le canal midi 2 de la main droite
+- Servo Controller	=> Active les servos via PCA9685 pour gerer l'ouverture/fermeture des valves ou desactiver l'alimentation quand inactif (reduire le bruit)  
+- Bellow Controller	=> Gère le moteur pas à pas en fonction du airFlowMultiplier de la velocité et du volume  
+- Settings => regroupe tout les reglages pour adapter le systeme  
 
-Instrument Controller	=> Interprète les notes et contrôle les moteurs et servomoteurs 
-
-Servo Controller	=> Active les servos via PCA9685 pour gerer l'ouverture/fermeture des valves ou desactiver l'alimentation quand inactif (reduire le bruit)
-
-Bellow Controller	=> Gère le moteur pas à pas en fonction du airFlowMultiplier de la velocité et du volume
-
-settings => regroupe tout les reglages pour adapter le systeme
-
-###  Configuration des Notes MIDI
-
-- ✔ Toutes les configurations sont dans settings.h
-- ✔ Gestion du airFlowMultiplier pour ajuster le débit d’air en fonction des notes jouées
-- ✔ Répartition des notes entre la main droite et la main gauche
 ## 📌 Gestion des Notes
 
 ### 🔹 Main Droite (Mélodie, 34 Notes Chromatiques)
@@ -70,7 +68,12 @@ settings => regroupe tout les reglages pour adapter le systeme
 |-------------------------|------|------|------|------|------|------|------|------|------|------|------|------|
 | **Rangée Aiguë**       | **48** | **55** | **50** | **57** | **52** | **59** | **54** | **61** | **56** | **63** | **58** | **53** |
 
+
  #### Tableau des Combinaisons d'Accords pour les 24 Servomoteurs
+ 
+> [!IMPORTANT]
+> les differents acords devrons etre géré sur le fichier midi => ca utilise trop de memoire
+
 
 | **Servo ID** | **Basse Simple (1 Servo Actif)** | **Accord Majeur (3 Servos Actifs)** | **Accord Mineur (3 Servos Actifs)** | **Accord 7ème (4 Servos Actifs)** | **Accord Diminué (3 Servos Actifs)** | **Accord Augmenté (3 Servos Actifs)** | **Accord à 2 Notes (Fondamentale + Quinte)** |
 |-------------|-------------|-------------------------|-------------------------|------------------------|--------------------------|--------------------------|----------------------------------|
@@ -129,7 +132,7 @@ settings => regroupe tout les reglages pour adapter le systeme
 - ✔ Si trop de notes sont activées (max 15 servos), elles sont jouées par priorité.
 - ✔ Alternance du sens d’ouverture/fermeture du soufflet :
 
-    Si le soufflet dépasse 50% de son ouverture, le prochain cycle se fait en sens inverse.
+    Si le soufflet dépasse 50% de son ouverture, le prochain cycle (nouvelle noteOn) se fait en sens inverse.
 
 ## 📌 Calibration et Sécurité
 
