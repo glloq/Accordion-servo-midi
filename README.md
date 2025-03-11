@@ -9,10 +9,17 @@ Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
 >  je travaille avec un viel accordeon recupéré qui ne fonctionne plus, 
 >  il a pris chaud (probablement dans une voiture), il y a des morceaux de cire partout et les anches ne tienent plus => Ca va me prendre du temps a remettre en etat avant de pouvoir tester :/
 
+ # choses a faire :
+- ajouter la gestion des pins oe de chaque pca pour desactiver les servos si non utilisé
+- ajouter un code avec un capteur et gerer la pression en direct ?
+- plans 2D des planches bois 
+- plans 3D et stl des fichiers a imprimer
+- liste completes des materiaux
+
 ## 📌 Objectif
 
 Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par des servomoteurs et un moteur pas à pas, permettant de :
-- ✔ Lire des fichiers MIDI via USB.
+- ✔ Lire et interpreter des messages MIDI via USB.
 - ✔ Contrôler chaque note individuellement via des servos.
 - ✔ Simuler le jeu d’un accordéoniste avec un soufflet dynamique.
 - ✔ Gérer les notes et accords de la main droite et de la main gauche.
