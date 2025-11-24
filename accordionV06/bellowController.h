@@ -9,8 +9,7 @@
 // États de la machine à états pour le calibrage
 enum CalibrationState {
     CALIB_IDLE,       // Pas de calibration en cours
-    CALIB_MOVING,     // En train de chercher le fin de course
-    CALIB_DONE        // Calibration terminée
+    CALIB_MOVING      // En train de chercher le fin de course
 };
 
 class BellowController {
@@ -35,11 +34,11 @@ private:
     ServoController &servoController; // Référence vers le contrôleur des servos
     FlexyStepper stepper;             // Moteur pas à pas pour contrôler le soufflet
 
-    bool valveOpen;        // Indique si la valve est ouverte
-    bool movingDirection;  // true = ouverture, false = fermeture
-    int16_t currentSpeed;  // Vitesse actuelle du soufflet
-    uint32_t lastNoteTime; // Temps de la dernière note jouée
-    byte volume;           // Volume actuel (0-127)
+    bool valveOpen;         // Indique si la valve est ouverte
+    bool movingDirection;   // true = ouverture, false = fermeture
+    bool motorRunning;      // Indique si le moteur est en mouvement
+    int16_t currentSpeed;   // Vitesse actuelle du soufflet
+    byte volume;            // Volume actuel (0-127)
     float lastTotalAirFlow; // Dernier débit d'air connu (pour updateVolume)
 
     // Machine à états pour calibration non-bloquante

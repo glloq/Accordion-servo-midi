@@ -5,7 +5,7 @@
 // Initialise les variables et stocke une référence vers ServoController
 BellowController::BellowController(ServoController &servoCtrl)
     : servoController(servoCtrl), valveOpen(false), movingDirection(true),
-      currentSpeed(0), lastNoteTime(0), volume(100), lastTotalAirFlow(0),
+      motorRunning(false), currentSpeed(0), volume(100), lastTotalAirFlow(0),
       calibState(CALIB_IDLE), lastEndstopMinTime(0), lastEndstopMaxTime(0),
       lastEndstopMinState(HIGH), lastEndstopMaxState(HIGH) {}
 
@@ -70,6 +70,17 @@ void BellowController::updateSpeed(float totalAirFlow) {
     // Ne pas bouger pendant la calibration
     if (calibState != CALIB_IDLE) return;
 
+    // Si aucune note active (airFlow = 0), arrêter le moteur
+    if (totalAirFlow <= 0.0f) {
+        if (motorRunning) {
+            // Arrête le moteur à la position actuelle
+            float currentPos = stepper.getCurrentPositionInMillimeters();
+            stepper.setTargetPositionInMillimeters(currentPos);
+            motorRunning = false;
+        }
+        return;
+    }
+
     // Calcul de la vitesse en fonction du débit d'air et du volume MIDI
     int16_t newSpeed = NORMAL_SPEED * totalAirFlow * (volume / 127.0f);
     newSpeed = constrain(newSpeed, STEPPER_MIN_SPEED, STEPPER_MAX_SPEED);
@@ -90,6 +101,7 @@ void BellowController::updateSpeed(float totalAirFlow) {
     float target = movingDirection ? BELLOW_MAX_POSITION : BELLOW_MIN_POSITION;
     stepper.setSpeedInMillimetersPerSecond(currentSpeed);
     stepper.setTargetPositionInMillimeters(target);
+    motorRunning = true;
 }
 
 // === MISE À JOUR DU VOLUME MIDI ===
@@ -129,11 +141,12 @@ void BellowController::checkEndStops() {
 }
 
 // === ARRÊT PROGRESSIF ===
-// Réduit lentement la vitesse du soufflet avant de l'arrêter complètement
+// Arrête le moteur et désactive le driver (économie d'énergie)
 void BellowController::stopWithDecay() {
-    stepper.setSpeedInMillimetersPerSecond(0);
-    openValve();
-    digitalWrite(STEPPER_EN_PIN, HIGH); // Désactive le moteur après un temps d'inactivité
+    float currentPos = stepper.getCurrentPositionInMillimeters();
+    stepper.setTargetPositionInMillimeters(currentPos);  // Arrête le mouvement
+    motorRunning = false;
+    digitalWrite(STEPPER_EN_PIN, HIGH); // Désactive le driver moteur
 }
 
 // === OUVERTURE DE LA VALVE ===

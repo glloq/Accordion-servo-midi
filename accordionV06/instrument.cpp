@@ -9,11 +9,32 @@ Instrument::Instrument()
 // === INITIALISATION ===
 void Instrument::begin() {
     servoController.begin();   // Initialise les PCA9685
+
+    // Ferme tous les servos au démarrage (position initiale sûre)
+    leftHand.closeAllServos();
+    rightHand.closeAllServos();
+
+    #if DEBUG
+    Serial.println(F("[DEBUG] Instrument: servos initialisés"));
+    #endif
+
     bellowController.begin();  // Initialise le moteur pas à pas et calibre
+
+    #if DEBUG
+    Serial.println(F("[DEBUG] Instrument: initialisation terminée"));
+    #endif
 }
 
 // === ACTIVATION D'UNE NOTE ===
 void Instrument::noteOn(byte note, byte velocity, byte channel) {
+    // Protection: limite le nombre de notes simultanées
+    if (activeNotes >= MAX_SIMULTANEOUS_NOTES) {
+        #if DEBUG
+        Serial.println(F("[DEBUG] Limite de notes atteinte, note ignorée"));
+        #endif
+        return;
+    }
+
     float airFlow = 0.0f;
 
     if (channel == MIDI_CHANNEL_LEFT) {
@@ -25,6 +46,12 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
             airFlow = rightHand.noteOn(note, velocity);
         }
     }
+    #if DEBUG
+    else {
+        Serial.print(F("[DEBUG] Canal MIDI ignoré: "));
+        Serial.println(channel);
+    }
+    #endif
 
     // Ne traiter que si une note a réellement été activée
     if (airFlow > 0) {
@@ -36,6 +63,15 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
         totalAirFlow += airFlow;
         activeNotes++;
         bellowController.updateSpeed(totalAirFlow);
+
+        #if DEBUG
+        Serial.print(F("[DEBUG] NoteOn: "));
+        Serial.print(note);
+        Serial.print(F(" ch="));
+        Serial.print(channel);
+        Serial.print(F(" active="));
+        Serial.println(activeNotes);
+        #endif
     }
 }
 
@@ -48,6 +84,7 @@ void Instrument::noteOff(byte note, byte channel) {
     } else if (channel == MIDI_CHANNEL_RIGHT) {
         airFlow = rightHand.noteOff(note);
     }
+
     if (airFlow > 0) {
         totalAirFlow -= airFlow;
         if (activeNotes > 0) activeNotes--;
@@ -55,9 +92,33 @@ void Instrument::noteOff(byte note, byte channel) {
         bellowController.updateSpeed(totalAirFlow);
 
         if (activeNotes == 0) {
-            lastActivityTime = millis(); // 🔄 Enregistrement du dernier NoteOff
+            lastActivityTime = millis();
         }
+
+        #if DEBUG
+        Serial.print(F("[DEBUG] NoteOff: "));
+        Serial.print(note);
+        Serial.print(F(" active="));
+        Serial.println(activeNotes);
+        #endif
     }
+}
+
+// === DÉSACTIVE TOUTES LES NOTES (MIDI PANIC) ===
+void Instrument::allNotesOff() {
+    leftHand.allNotesOff();
+    rightHand.allNotesOff();
+
+    totalAirFlow = 0;
+    activeNotes = 0;
+    lastActivityTime = millis();
+
+    bellowController.updateSpeed(0);
+    bellowController.openValve();
+
+    #if DEBUG
+    Serial.println(F("[DEBUG] All Notes Off - MIDI Panic"));
+    #endif
 }
 
 // === MET À JOUR L'INSTRUMENT ===
@@ -66,6 +127,7 @@ void Instrument::update() {
     managePCA();        // Gère l'activation/désactivation des PCA
     manageInactivity(); // Gère l'inactivité du soufflet
 }
+
 // === GESTION DE LA DÉSACTIVATION DES PCA ===
 void Instrument::managePCA() {
     if (activeNotes == 0 && millis() - lastActivityTime > PCA_DISABLE_DELAY) {
@@ -75,15 +137,22 @@ void Instrument::managePCA() {
 
 // === GESTION DU VOLUME MIDI ===
 void Instrument::setVolume(byte volume) {
-    //currentVolume = volume;
-    bellowController.updateVolume(volume); // 🔹 Ajuste la vitesse du soufflet en fonction du volume
+    bellowController.updateVolume(volume);
+
+    #if DEBUG
+    Serial.print(F("[DEBUG] Volume: "));
+    Serial.println(volume);
+    #endif
 }
 
 // === GESTION DE L'INACTIVITÉ DU SOUFFLET ===
 void Instrument::manageInactivity() {
     if (activeNotes == 0 && millis() - lastActivityTime > BELLOW_INACTIVITY_TIMEOUT) {
-        bellowController.openValve(); // 🔄 ouvre la valve après 1 min d'inactivité
+        bellowController.openValve();
+        bellowController.stopWithDecay();
 
-        bellowController.stopWithDecay(); // 🔄 Désactive le moteur du soufflet
+        #if DEBUG
+        Serial.println(F("[DEBUG] Inactivité - moteur désactivé"));
+        #endif
     }
 }
