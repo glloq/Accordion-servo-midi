@@ -11,7 +11,10 @@
 #define MIDI_CHANNEL_RIGHT 2 // Canal MIDI dédié à la main droite
 
 
-#define BEBUG false
+#define DEBUG false
+
+// Délai de debounce pour les fins de course (en millisecondes)
+#define ENDSTOP_DEBOUNCE_MS 50
 
 //===========================================================================================================
 //==== Gestion du moteur pas a pas

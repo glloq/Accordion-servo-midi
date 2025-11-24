@@ -14,9 +14,9 @@ public:
 
 private:
     Instrument& instrument;
-    byte volume;
-    
-    void processMIDI(); // Interne, traite les messages MIDI
+    bool sustainActive;  // État de la pédale de sustain
+
+    void processMIDI();  // Interne, traite les messages MIDI
     void handleControlChange(byte control, byte value);
 };
 
