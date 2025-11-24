@@ -2,26 +2,41 @@
 
 Instrument::Instrument()
     : totalAirFlow(0), activeNotes(0), lastActivityTime(millis()),
-      leftHand(servoController, LEFT_HAND_MAPPING, FIRST_NOTE_LEFT, NUM_NOTES_LEFT), 
+      leftHand(servoController, LEFT_HAND_MAPPING, FIRST_NOTE_LEFT, NUM_NOTES_LEFT),
       rightHand(servoController, RIGHT_HAND_MAPPING, FIRST_NOTE_RIGHT, NUM_NOTES_RIGHT),
       bellowController(servoController) {}
 
+// === INITIALISATION ===
+void Instrument::begin() {
+    servoController.begin();   // Initialise les PCA9685
+    bellowController.begin();  // Initialise le moteur pas à pas et calibre
+}
+
 // === ACTIVATION D'UNE NOTE ===
 void Instrument::noteOn(byte note, byte velocity, byte channel) {
-  float airFlow = 0.0f;
+    float airFlow = 0.0f;
 
-  if (channel == MIDI_CHANNEL_LEFT) {
-    if (leftHand.canPlay(note)) {
-      airFlow = leftHand.noteOn(note, velocity);
+    if (channel == MIDI_CHANNEL_LEFT) {
+        if (leftHand.canPlay(note)) {
+            airFlow = leftHand.noteOn(note, velocity);
+        }
+    } else if (channel == MIDI_CHANNEL_RIGHT) {
+        if (rightHand.canPlay(note)) {
+            airFlow = rightHand.noteOn(note, velocity);
+        }
     }
-  } else if (channel == MIDI_CHANNEL_RIGHT) {
-    if (rightHand.canPlay(note)) {
-      airFlow = rightHand.noteOn(note, velocity);
+
+    // Ne traiter que si une note a réellement été activée
+    if (airFlow > 0) {
+        // Fermer la valve si c'est la première note (créer la pression)
+        if (activeNotes == 0) {
+            bellowController.closeValve();
+        }
+
+        totalAirFlow += airFlow;
+        activeNotes++;
+        bellowController.updateSpeed(totalAirFlow);
     }
-  }
-  totalAirFlow += airFlow;
-  activeNotes++;
-  bellowController.updateSpeed(totalAirFlow);
 }
 
 // === DÉSACTIVATION D'UNE NOTE ===

@@ -4,57 +4,78 @@
 // === CONSTRUCTEUR ===
 // Initialise les variables et stocke une référence vers ServoController
 BellowController::BellowController(ServoController &servoCtrl)
-    : servoController(servoCtrl), valveOpen(false), movingDirection(true), currentSpeed(0), lastNoteTime(0), volume(10) {}
+    : servoController(servoCtrl), valveOpen(false), movingDirection(true),
+      currentSpeed(0), lastNoteTime(0), volume(100), lastTotalAirFlow(0),
+      calibState(CALIB_IDLE), lastEndstopMinTime(0), lastEndstopMaxTime(0),
+      lastEndstopMinState(HIGH), lastEndstopMaxState(HIGH) {}
 
 // === INITIALISATION ===
-// Configure le moteur pas à pas et effectue le calibrage du soufflet
+// Configure le moteur pas à pas et démarre le calibrage
 void BellowController::begin() {
     stepper.connectToPins(STEPPER_STEP_PIN, STEPPER_DIR_PIN);
     stepper.setStepsPerMillimeter(STEP_PER_MM);
     stepper.setSpeedInMillimetersPerSecond(STEPPER_MIN_SPEED);
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
-    
+
     pinMode(LIMIT_SWITCH_MIN_PIN, INPUT_PULLUP);
     pinMode(LIMIT_SWITCH_MAX_PIN, INPUT_PULLUP);
     pinMode(STEPPER_EN_PIN, OUTPUT);
     digitalWrite(STEPPER_EN_PIN, LOW); // Active le moteur
 
-    calibrateZero(); // Effectue un homing au démarrage
+    startCalibration(); // Démarre le homing (non-bloquant)
 }
 
 // === MISE À JOUR ===
 // Met à jour la position du moteur et vérifie les fins de course
 void BellowController::update() {
+    // Gère la calibration si en cours
+    if (calibState != CALIB_IDLE) {
+        updateCalibration();
+    }
+
     stepper.processMovement();
     checkEndStops();
 }
 
-// === CALIBRAGE HOMING ===
-// Positionne le soufflet en butée pour définir une référence
-void BellowController::calibrateZero() {
-    openValve(); //ouvre la vanne a vide 
+// === DÉMARRAGE CALIBRAGE (NON-BLOQUANT) ===
+void BellowController::startCalibration() {
+    openValve();  // Ouvre la vanne à vide
     digitalWrite(STEPPER_EN_PIN, LOW);
     stepper.setSpeedInMillimetersPerSecond(STEPPER_MIN_SPEED);
-    
-    // Déplacement jusqu'à atteindre le capteur de fin de course
-    while (digitalRead(LIMIT_SWITCH_MIN_PIN) == HIGH) {
-        stepper.moveRelativeInMillimeters(-1);
+
+    // Configure le mouvement continu vers le min
+    stepper.setTargetPositionInMillimeters(-BELLOW_MAX_POSITION * 2);
+    calibState = CALIB_MOVING;
+}
+
+// === MISE À JOUR CALIBRAGE ===
+void BellowController::updateCalibration() {
+    if (calibState == CALIB_MOVING) {
+        // Vérifie si le fin de course min est atteint
+        if (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW) {
+            stepper.setCurrentPositionInMillimeters(0);
+            stepper.setTargetPositionInMillimeters(0);  // Arrête le mouvement
+            movingDirection = true;
+            calibState = CALIB_IDLE;
+        }
     }
-    
-    // Définition de la position de référence
-    stepper.setCurrentPositionInMillimeters(0);
-    movingDirection = true;
 }
 
 // === MISE À JOUR DE LA VITESSE ===
 // Ajuste la vitesse du soufflet en fonction du débit d'air des notes actives
 void BellowController::updateSpeed(float totalAirFlow) {
+    // Sauvegarde pour updateVolume()
+    lastTotalAirFlow = totalAirFlow;
+
+    // Ne pas bouger pendant la calibration
+    if (calibState != CALIB_IDLE) return;
+
     // Calcul de la vitesse en fonction du débit d'air et du volume MIDI
-    int16_t newSpeed = NORMAL_SPEED * totalAirFlow * (volume / 127.0);
+    int16_t newSpeed = NORMAL_SPEED * totalAirFlow * (volume / 127.0f);
     newSpeed = constrain(newSpeed, STEPPER_MIN_SPEED, STEPPER_MAX_SPEED);
     currentSpeed = newSpeed;
 
-    // 🔹 Vérification des seuils pour inverser la direction avant les FDC
+    // Vérification des seuils pour inverser la direction avant les FDC
     float currentPosition = stepper.getCurrentPositionInMillimeters();
     float normalizedPosition = (currentPosition - BELLOW_MIN_POSITION) / (BELLOW_MAX_POSITION - BELLOW_MIN_POSITION);
 
@@ -65,32 +86,43 @@ void BellowController::updateSpeed(float totalAirFlow) {
         movingDirection = true; // On commence à rouvrir le soufflet
     }
 
-    // 🔹 Ajustement du sens en fonction de movingDirection
-    if (movingDirection) {
-        stepper.setSpeedInMillimetersPerSecond(currentSpeed);
-    } else {
-        stepper.setSpeedInMillimetersPerSecond(-currentSpeed); // Inversion de la vitesse pour refermer
-    }
-
-    stepper.processMovement();
+    // Définit la cible en fonction de la direction
+    float target = movingDirection ? BELLOW_MAX_POSITION : BELLOW_MIN_POSITION;
+    stepper.setSpeedInMillimetersPerSecond(currentSpeed);
+    stepper.setTargetPositionInMillimeters(target);
 }
 
 // === MISE À JOUR DU VOLUME MIDI ===
 // Permet de moduler l'intensité du soufflet en fonction du volume MIDI reçu
 void BellowController::updateVolume(byte volumeValue) {
     volume = volumeValue;
-    updateSpeed(1.0); // Force une mise à jour de la vitesse
+    // Utilise le dernier débit d'air connu au lieu de 1.0
+    updateSpeed(lastTotalAirFlow);
 }
 
-// === VÉRIFICATION DES FINS DE COURSE ===
+// === VÉRIFICATION DES FINS DE COURSE (AVEC DEBOUNCE) ===
 // Stoppe le moteur si une extrémité est atteinte
 void BellowController::checkEndStops() {
-    if (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW) {
+    uint32_t now = millis();
+    bool currentMinState = digitalRead(LIMIT_SWITCH_MIN_PIN);
+    bool currentMaxState = digitalRead(LIMIT_SWITCH_MAX_PIN);
+
+    // Debounce fin de course MIN
+    if (currentMinState != lastEndstopMinState) {
+        lastEndstopMinTime = now;
+        lastEndstopMinState = currentMinState;
+    }
+    if (currentMinState == LOW && (now - lastEndstopMinTime) > ENDSTOP_DEBOUNCE_MS) {
         stepper.setCurrentPositionInMillimeters(BELLOW_MIN_POSITION);
         movingDirection = true;
     }
-    
-    if (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW) {
+
+    // Debounce fin de course MAX
+    if (currentMaxState != lastEndstopMaxState) {
+        lastEndstopMaxTime = now;
+        lastEndstopMaxState = currentMaxState;
+    }
+    if (currentMaxState == LOW && (now - lastEndstopMaxTime) > ENDSTOP_DEBOUNCE_MS) {
         stepper.setCurrentPositionInMillimeters(BELLOW_MAX_POSITION);
         movingDirection = false;
     }

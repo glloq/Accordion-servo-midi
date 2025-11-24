@@ -14,8 +14,7 @@ public:
 
 private:
     Instrument& instrument;
-    byte volume;
-    
+
     void processMIDI(); // Interne, traite les messages MIDI
     void handleControlChange(byte control, byte value);
 };

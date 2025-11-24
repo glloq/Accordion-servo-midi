@@ -4,7 +4,7 @@
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 
 MidiHandler::MidiHandler(Instrument& instr)
-    : instrument(instr), volume(127) {}
+    : instrument(instr) {}
 
 void MidiHandler::begin() {
     MIDI.begin(MIDI_CHANNEL_OMNI); // Écoute tous les canaux MIDI
@@ -35,10 +35,9 @@ void MidiHandler::processMIDI() {
     }
 }
 
-// Gestion des changements de volume MIDI
+// Gestion des Control Change MIDI
 void MidiHandler::handleControlChange(byte control, byte value) {
-    if (control == 7) {
-        volume = value;
-        instrument.setVolume(volume);
+    if (control == 7) {  // CC#7 = Volume
+        instrument.setVolume(value);
     }
 }

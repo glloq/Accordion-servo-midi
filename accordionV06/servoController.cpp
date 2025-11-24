@@ -7,10 +7,16 @@ ServoController::ServoController() : pcaEnabled(true) { // Initialisé à "activ
 }
 
 void ServoController::begin() {
+    // Configure le pin OE pour contrôler l'alimentation des servos
+    pinMode(PCA_OE_PIN, OUTPUT);
+    digitalWrite(PCA_OE_PIN, HIGH);  // Désactive temporairement pendant l'init
+    pcaEnabled = false;
+
     for (int i = 0; i < NUM_PCA_TOTAL; i++) {
         pca[i].begin();
         pca[i].setPWMFreq(SERVO_PWM_FREQUENCY); // Fréquence adaptée aux servos
     }
+
     enableServos(true); // Active les PCA au démarrage
 }
 
