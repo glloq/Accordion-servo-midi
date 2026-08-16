@@ -6,15 +6,35 @@ Instrument::Instrument()
       bellowController(servoController),
       leftHand(servoController, LEFT_HAND_MAPPING, NUM_NOTES_LEFT),
       rightHand(servoController, RIGHT_HAND_MAPPING, NUM_NOTES_RIGHT),
-      state(SYS_BOOT),
-      totalAirFlow(0.0f), activeNotes(0), noteSequence(0),
-      lastVelocity(100), lastAttackTime(0), attackActive(false),
+      state(SYS_BOOT), instrumentFault(INST_FAULT_NONE),
+      noteSequence(0),
+      attackHand(NULL), attackIndex(0), lastAttackTime(0), attackActive(false),
       sustainActive(false), bellowIdle(false), lastActivityTime(0) {}
+
+byte Instrument::getActiveNoteCount() const {
+    // Derive des deux mains plutot que maintenu a la main : aucun risque de desynchronisation
+    // entre le compteur et l'etat reel des valves.
+    return leftHand.getActiveNoteCount() + rightHand.getActiveNoteCount();
+}
 
 // === INITIALISATION ===
 void Instrument::begin() {
     state = SYS_SERVO_INIT;
-    servoController.begin();   // Initialise les PCA9685
+
+    // Un PCA9685 absent signifie des anches muettes, voire une valve generale inoperante
+    // alors que le soufflet, lui, fonctionnerait : on ne demarre pas.
+    if (!servoController.begin()) {
+        // Le soufflet n'est pas encore initialise : on met le driver hors tension
+        // directement, sans passer par BellowController.
+        pinMode(STEPPER_EN_PIN, OUTPUT);
+        digitalWrite(STEPPER_EN_PIN, HIGH);
+        enterFault(INST_FAULT_PCA_MISSING);
+        #if DEBUG
+        Serial.print(F("[DEBUG] PCA manquants, masque: "));
+        Serial.println((int)servoController.getMissingMask());
+        #endif
+        return;
+    }
 
     // Ferme tous les servos au demarrage (position initiale sure), de maniere echelonnee
     // pour ne pas solliciter les 59 servos en meme temps.
@@ -42,38 +62,28 @@ HandController *Instrument::handForChannel(byte channel) {
     return NULL;
 }
 
-// === FACTEUR DE DYNAMIQUE ===
-// La velocite ne peut pas agir sur les servos (une valve est ouverte ou fermee). Elle agit
-// donc sur la demande d'air : une attaque breve plus forte, puis un niveau tenu.
-float Instrument::velocityFactor() const {
-    if (activeNotes == 0) return 1.0f;
+// === ATTAQUE ===
+// Supplement de debit applique uniquement a la derniere note declenchee. Une note jouee
+// fort au milieu d'un accord ne booste donc plus l'accord entier, et une note jouee
+// doucement ne fait plus chuter le debit des autres.
+float Instrument::attackBonus() const {
+    if (!attackActive || attackHand == NULL) return 0.0f;
 
-    float v = lastVelocity / 127.0f;
-    float sustainLevel = VELOCITY_SUSTAIN_MIN + (1.0f - VELOCITY_SUSTAIN_MIN) * v;
-
-    if (attackActive) {
-        return sustainLevel * (1.0f + VELOCITY_ATTACK_BOOST * v);
-    }
-    return sustainLevel;
+    byte velocity = attackHand->velocityOfIndex(attackIndex);
+    float v = velocity / 127.0f;
+    return attackHand->airFlowOfIndex(attackIndex) * velocitySustainWeight(velocity) *
+           VELOCITY_ATTACK_BOOST * v;
 }
 
+void Instrument::clearAttack() {
+    attackActive = false;
+    attackHand = NULL;
+}
+
+// === DEMANDE D'AIR ===
 void Instrument::refreshAirDemand() {
-    bellowController.setAirDemand(totalAirFlow, velocityFactor());
-}
-
-// === RETRAIT D'AIR (note relachee ou volee) ===
-void Instrument::removeAir(float airFlow, byte noteCount) {
-    totalAirFlow -= airFlow;
-    if (totalAirFlow < 0.0f) totalAirFlow = 0.0f;
-
-    if (activeNotes >= noteCount) activeNotes -= noteCount;
-    else activeNotes = 0;
-
-    if (activeNotes == 0) {
-        lastActivityTime = millis();
-        attackActive = false;
-    }
-    refreshAirDemand();
+    float demand = leftHand.weightedAirFlow() + rightHand.weightedAirFlow() + attackBonus();
+    bellowController.setAirDemand(demand);
 }
 
 // === VOL DE VOIX ===
@@ -96,7 +106,7 @@ bool Instrument::stealVoice(byte incomingPriority) {
 
     if (hasLeft && hasRight) {
         bool takeLeft = (leftPriority < rightPriority) ||
-                        (leftPriority == rightPriority && leftSeq < rightSeq);
+                        (leftPriority == rightPriority && seqIsOlder(leftSeq, rightSeq));
         victim = takeLeft ? &leftHand : &rightHand;
         index = takeLeft ? leftIndex : rightIndex;
     } else if (hasLeft) {
@@ -107,12 +117,10 @@ bool Instrument::stealVoice(byte incomingPriority) {
         index = rightIndex;
     }
 
-    float airFlow = victim->releaseIndex(index);
-    if (airFlow <= 0.0f) return false;
+    // Si la voix volee est celle en cours d'attaque, l'attaque n'a plus d'objet.
+    if (attackActive && attackHand == victim && attackIndex == index) clearAttack();
 
-    totalAirFlow -= airFlow;
-    if (totalAirFlow < 0.0f) totalAirFlow = 0.0f;
-    if (activeNotes > 0) activeNotes--;
+    if (victim->releaseIndex(index) <= 0.0f) return false;
 
     #if DEBUG
     Serial.println(F("[DEBUG] Vol de voix"));
@@ -139,21 +147,14 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
         return;
     }
 
-    if (!hand->canPlay(note)) return;
+    int8_t index = hand->indexOf(note);
+    if (index < 0) return; // Note absente du mapping de cette main
 
-    // Note deja ouverte : on relance seulement l'attaque et on annule un eventuel
-    // maintien par la pedale, sans recompter le debit d'air.
-    if (hand->isNoteActive(note)) {
-        hand->noteOn(note, ++noteSequence);
-        lastVelocity = velocity;
-        lastAttackTime = millis();
-        attackActive = true;
-        refreshAirDemand();
-        return;
-    }
+    bool wasActive = hand->isNoteActive(note);
 
     // Limite de notes simultanees : on tente de liberer une voix moins prioritaire.
-    if (activeNotes >= MAX_SIMULTANEOUS_NOTES) {
+    // (Une note deja ouverte ne consomme pas de voix supplementaire.)
+    if (!wasActive && getActiveNoteCount() >= MAX_SIMULTANEOUS_NOTES) {
         if (!stealVoice(hand->priorityOf(note))) {
             #if DEBUG
             Serial.println(F("[DEBUG] Limite de notes atteinte, note ignoree"));
@@ -162,19 +163,15 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
         }
     }
 
-    float airFlow = hand->noteOn(note, ++noteSequence);
-    if (airFlow <= 0.0f) return;
+    bool firstNote = (getActiveNoteCount() == 0);
+    hand->noteOn(note, velocity, ++noteSequence);
 
     // Ferme la valve si c'est la premiere note (creation de la pression)
-    if (activeNotes == 0) {
-        bellowController.closeValve();
-    }
+    if (firstNote) bellowController.closeValve();
 
-    totalAirFlow += airFlow;
-    activeNotes++;
     bellowIdle = false;
-
-    lastVelocity = velocity;
+    attackHand = hand;
+    attackIndex = (byte)index;
     lastAttackTime = millis();
     attackActive = true;
 
@@ -186,7 +183,7 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
     Serial.print(F(" ch="));
     Serial.print(channel);
     Serial.print(F(" active="));
-    Serial.println(activeNotes);
+    Serial.println(getActiveNoteCount());
     #endif
 }
 
@@ -202,16 +199,20 @@ void Instrument::noteOff(byte note, byte channel) {
         return;
     }
 
-    float airFlow = hand->noteOff(note);
-    if (airFlow <= 0.0f) return;
+    int8_t index = hand->indexOf(note);
+    if (index >= 0 && attackActive && attackHand == hand && attackIndex == (byte)index) {
+        clearAttack();
+    }
 
-    removeAir(airFlow, 1);
+    if (hand->noteOff(note) <= 0.0f) return;
+
+    refreshAirDemand();
 
     #if DEBUG
     Serial.print(F("[DEBUG] NoteOff: "));
     Serial.print(note);
     Serial.print(F(" active="));
-    Serial.println(activeNotes);
+    Serial.println(getActiveNoteCount());
     #endif
 }
 
@@ -224,13 +225,14 @@ void Instrument::setSustain(bool active) {
 
     // Relachement : on ferme reellement toutes les notes retenues par la pedale.
     byte releasedLeft = 0, releasedRight = 0;
-    float airFlow = leftHand.releaseSustained(releasedLeft);
-    airFlow += rightHand.releaseSustained(releasedRight);
+    leftHand.releaseSustained(releasedLeft);
+    rightHand.releaseSustained(releasedRight);
 
     byte released = releasedLeft + releasedRight;
     if (released == 0) return;
 
-    removeAir(airFlow, released);
+    if (getActiveNoteCount() == 0) clearAttack();
+    refreshAirDemand();
 
     #if DEBUG
     Serial.print(F("[DEBUG] Sustain relache, notes fermees: "));
@@ -243,9 +245,7 @@ void Instrument::allNotesOff() {
     leftHand.allNotesOff();
     rightHand.allNotesOff();
 
-    totalAirFlow = 0.0f;
-    activeNotes = 0;
-    attackActive = false;
+    clearAttack();
     sustainActive = false;
     lastActivityTime = millis();
 
@@ -259,19 +259,27 @@ void Instrument::allNotesOff() {
 }
 
 // === PASSAGE EN DEFAUT ===
-void Instrument::enterFault() {
+void Instrument::enterFault(InstrumentFault reason) {
+    if (state == SYS_FAULT) return; // Premier defaut conserve
+
     leftHand.allNotesOff();
     rightHand.allNotesOff();
 
-    totalAirFlow = 0.0f;
-    activeNotes = 0;
-    attackActive = false;
+    clearAttack();
     sustainActive = false;
     lastActivityTime = millis();
+    instrumentFault = reason;
     state = SYS_FAULT;
 
+    // Le soufflet doit aussi se mettre en securite si le defaut vient d'ailleurs.
+    if (!bellowController.hasFault() && reason != INST_FAULT_BELLOW) {
+        bellowController.stopAndDisable();
+        bellowController.openValve();
+    }
+
     #if DEBUG
-    Serial.println(F("[DEBUG] Instrument en defaut"));
+    Serial.print(F("[DEBUG] Instrument en defaut, cause: "));
+    Serial.println((int)reason);
     #endif
 }
 
@@ -281,7 +289,10 @@ void Instrument::update() {
 
     // Transitions d'etat
     if (bellowController.hasFault()) {
-        if (state != SYS_FAULT) enterFault();
+        enterFault(INST_FAULT_BELLOW);
+    } else if (servoController.hasBusFailure()) {
+        // Un PCA qui cesse de repondre en cours de jeu laisserait des anches ouvertes.
+        enterFault(INST_FAULT_PCA_BUS);
     } else if (state == SYS_HOMING && bellowController.isReady()) {
         state = SYS_READY;
         lastActivityTime = millis();
@@ -292,9 +303,13 @@ void Instrument::update() {
 
     // Fin de la phase d'attaque : on repasse au niveau tenu.
     if (attackActive && (millis() - lastAttackTime) >= VELOCITY_ATTACK_MS) {
-        attackActive = false;
+        clearAttack();
         refreshAirDemand();
     }
+
+    // Horodatage de la derniere activite : mis a jour tant qu'une note est ouverte, ce qui
+    // evite d'avoir a detecter la transition vers zero.
+    if (getActiveNoteCount() > 0) lastActivityTime = millis();
 
     managePCA();        // Gere la coupure de l'OE des PCA
     manageInactivity(); // Gere l'inactivite du soufflet
@@ -308,7 +323,7 @@ void Instrument::update() {
 //    temps d'atteindre sa position.
 void Instrument::managePCA() {
     if (state != SYS_READY) return;
-    if (activeNotes != 0) return;
+    if (getActiveNoteCount() != 0) return;
 
     if ((millis() - servoController.getLastCommandTime()) > PCA_DISABLE_DELAY) {
         servoController.enableServos(false);
@@ -320,7 +335,7 @@ void Instrument::manageInactivity() {
     // Jamais pendant le homing : la calibration peut durer plusieurs dizaines de secondes
     // et couper le driver a ce moment-la bloquait definitivement le soufflet.
     if (state != SYS_READY) return;
-    if (activeNotes != 0 || bellowIdle) return;
+    if (getActiveNoteCount() != 0 || bellowIdle) return;
 
     if ((millis() - lastActivityTime) > BELLOW_INACTIVITY_TIMEOUT) {
         bellowController.openValve();

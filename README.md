@@ -14,6 +14,8 @@ Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
 - ajouter un capteur de pression et une regulation PI/PID (aujourd'hui tout est en boucle ouverte)
 - piloter le TMC2209 en UART (courant RMS, microsteps, StealthChop, detection de blocage)
 - alimenter les servos par bancs (fusible + condensateur + load switch par PCA)
+- generateur STEP sur timer materiel, independant de la boucle MIDI/I2C
+- validation sur le mecanisme reel (hardware-in-the-loop)
 - plans 2D des planches bois 
 - plans 3D et stl des fichiers a imprimer
 - liste completes des materiaux
@@ -95,7 +97,9 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 - ✔ Le moteur ajuste sa vitesse en fonction des notes jouées.
 - ✔ Si aucune note n’est active, le moteur s’arrête. `CC7 = 0` coupe réellement la pression.
 - ✔ La vélocité MIDI agit sur le **débit d'air** (attaque brève puis niveau tenu), pas sur
-  les servos : une valve d'anche est ouverte ou fermée, sans nuance possible.
+  les servos : une valve d'anche est ouverte ou fermée, sans nuance possible. Elle est
+  appliquée **par note** — une note douce ajoutée à un accord fort ne fait pas chuter le
+  débit de tout l'accord, et l'attaque ne concerne que la dernière note déclenchée.
 - ✔ Alternance du sens d’ouverture/fermeture du soufflet :
 
     Le sens s'inverse à **70 % d'ouverture** et **30 % de fermeture**. Ces seuils sont
@@ -131,19 +135,49 @@ BOOT → SERVO_INIT → HOMING → READY ⇄ (inactivité)
 - L'arrêt sur inactivité et la coupure de l'OE des PCA sont inhibés hors de `READY` :
   couper le driver ou la valve pendant le homing bloquait le soufflet.
 
-### 🔹 Calibration automatique (non bloquante)
+### 🔹 Arrêt sur fin de course
 
-- Ouvre la valve principale, active le driver.
-- Recule jusqu’à la butée fermée (réinitialisation du zéro).
-- Un fin de course déjà enfoncé au démarrage est détecté immédiatement.
+Le contact est lu **brut**, sans debounce, et déclenche immédiatement la coupure de
+`ENABLE` : à 25 mm/s, attendre les 50 ms de debounce représenterait 1,25 mm de surcourse.
+Le debounce ne sert qu'à *interpréter* ensuite le contact (réel ou parasite).
+
+`FlexyStepper` conserve son propre état de direction et de rampe : changer la position
+courante ou la cible **n'arrête pas** le moteur, et la bibliothèque documente que
+`setCurrentPosition()` ne doit être appelée qu'à l'arrêt. D'où la séquence :
+
+```
+contact brut ──► coupure ENABLE (arrêt physique, immédiat)
+             ──► purge de l'état cinématique, driver déjà coupé (aucun mouvement)
+             ──► attente de la confirmation par debounce
+             ──► recalage de position, puis reprise ou défaut
+```
+
+### 🔹 Calibration automatique (non bloquante, deux passes)
+
+```
+approche rapide (10 mm/s) ──► contact ──► dégagement 4 mm ──► réapproche lente (1,5 mm/s) ──► zéro
+```
+
+Le premier contact ne sert qu'à localiser grossièrement la butée : la surcourse y est
+inconnue puisque le driver est coupé sans rampe maîtrisée. Seule la seconde approche,
+lente, fixe un zéro répétable. Un fin de course déjà enfoncé au démarrage est détecté
+immédiatement.
 
 ### 🔹 Défauts détectés
 
-| Code                    | Cause                                                |
-|-------------------------|------------------------------------------------------|
-| `FAULT_HOMING_TIMEOUT`  | Butée basse non atteinte dans `HOMING_TIMEOUT_MS`     |
-| `FAULT_HOMING_DISTANCE` | Course > `HOMING_MAX_DISTANCE` sans contact           |
-| `FAULT_ENDSTOP_WIRING`  | Les deux fins de course actifs simultanément          |
+| Code                     | Cause                                                     |
+|--------------------------|-----------------------------------------------------------|
+| `FAULT_HOMING_TIMEOUT`   | Homing non terminé dans `HOMING_TIMEOUT_MS`                |
+| `FAULT_HOMING_DISTANCE`  | Course maximale parcourue sans rencontrer la butée         |
+| `FAULT_HOMING_DIRECTION` | Butée **haute** atteinte pendant le homing (DIR inversé ?) |
+| `FAULT_ENDSTOP_WIRING`   | Les deux fins de course actifs simultanément               |
+| `FAULT_ENDSTOP_STUCK`    | Contact toujours actif après le dégagement                 |
+| `FAULT_STOP_TIMEOUT`     | La séquence d'arrêt ne se termine pas                      |
+
+Côté servos, l'instrument refuse aussi de démarrer si un PCA9685 ne répond pas
+(`INST_FAULT_PCA_MISSING`), et passe en défaut si le bus I²C accumule
+`SERVO_I2C_ERROR_LIMIT` erreurs consécutives en cours de jeu (`INST_FAULT_PCA_BUS`) —
+un PCA muet laisserait sinon des anches ouvertes sans que rien ne le signale.
 
 En défaut : moteur coupé, valve ouverte (pression libérée), toutes les notes fermées,
 servos maintenus alimentés pour que la valve tienne sa position. L'état est verrouillé.
@@ -157,19 +191,37 @@ servos maintenus alimentés pour que la valve tienne sa position. L'état est ve
 
 ```bash
 # Firmware (PlatformIO)
-pio run -e leonardo           # MIDI DIN sur Serial1 (défaut)
-pio run -e leonardo_usbmidi   # MIDI DIN + MIDI USB natif
-pio run -e leonardo -t upload
+pio run -e leonardo_din       # MIDI DIN sur Serial1 (défaut, empreinte la plus légère)
+pio run -e leonardo_usb       # MIDI USB natif seul
+pio run -e leonardo_din_usb   # les deux (expérimental : SRAM très juste sur ATmega32U4)
+pio run -e leonardo_din -t upload
 
-# Tests de logique (g++ seul, ni AVR ni matériel)
+# Tests (g++ seul, ni toolchain AVR ni matériel)
 make -C test
 ```
 
-Les tests rejouent le firmware sur une machine simulée : le stub `FlexyStepper` simule le
-déplacement réel et les fins de course sont **déduits de la position du soufflet**, comme
-des capteurs physiques. Ils couvrent le homing et ses défauts, le refus du MIDI pendant la
-calibration, l'inversion 30/70 % sur note tenue, la réactivation du driver après
-inactivité, `CC7 = 0`, le sustain, le mapping du clavier gauche et la priorité de voix.
+Les tables de notes vivent en **PROGMEM** sur AVR (~580 octets de SRAM libérés sur les
+2560 de l'ATmega32U4) : tout accès passe obligatoirement par les accesseurs de
+`noteMapping.h`. La cible `test_behavior_progmem` rejoue toute la suite en compilant ce
+chemin de code, pour qu'un accès direct aux tables ne puisse pas passer inaperçu.
+
+Les tests rejouent le firmware sur une machine simulée. Le stub `FlexyStepper` modélise
+**un pas par appel**, les rampes d'accélération, la persistance de la direction, et le
+fait que la position **physique** ne bouge que si le driver est alimenté — alors que le
+compteur interne de la bibliothèque avance dans tous les cas. Les fins de course sont
+déduits de la position physique, comme de vrais capteurs.
+
+| Suite | Couvre |
+|-------|--------|
+| `test_note_mapping` | Disposition du clavier gauche, collisions de canaux PCA, angles |
+| `test_stepper_stop` | Arrêt sur fin de course, surcourse, recalage à l'arrêt, DIR inversé |
+| `test_timing`       | Fréquence de pas atteinte, rafale MIDI, coût I²C d'un accord |
+| `test_behavior`     | Homing et défauts, gating MIDI, 30/70 %, CC7, sustain, polyphonie, PCA absent |
+
+`test_stepper_stop` commence par vérifier que le **stub lui-même** reproduit le défaut :
+l'ancien motif `setTargetPosition(position courante)` produit bien ~9,8 mm de surcourse à
+10 mm/s (`v²/2a`), là où le firmware actuel coupe à 0,002 mm du contact. Un stub trop
+idéalisé validerait n'importe quoi.
 
 Le projet reste compilable tel quel dans l'IDE Arduino (dossier `accordionV06/`).
 Bibliothèques requises : *Adafruit PWM Servo Driver*, *MIDI Library*, *FlexyStepper*,

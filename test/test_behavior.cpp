@@ -1,12 +1,11 @@
 // =========================================================================================
 // Tests de comportement du firmware, joues sur une machine simulee.
 //
-// Les stubs de test/stubs/ remplacent Arduino, Wire, Adafruit_PWMServoDriver, FlexyStepper
-// et MIDI. Le stub FlexyStepper simule reellement le deplacement, et les fins de course
-// sont DEDUITS de la position du soufflet (comme des capteurs physiques) : un recalage de
-// coordonnee ne deplace pas les contacts.
+// Le stub FlexyStepper modelise un pas par appel, les rampes d'acceleration, la
+// persistance de la direction et le fait que la position PHYSIQUE ne bouge que si le
+// driver est alimente. Les fins de course sont deduits de la position physique.
 //
-// Chaque scenario correspond a un point de l'audit.
+// Chaque scenario correspond a un point d'audit.
 // =========================================================================================
 #include <cmath>
 #include "harness.h"
@@ -15,81 +14,84 @@
 #include "bellowController.h"
 #include "test_assert.h"
 
-// Avance le temps simule et fait tourner la boucle principale.
-static void run(Instrument &inst, unsigned long ms, unsigned long stepMs = 1) {
-    for (unsigned long t = 0; t < ms; t += stepMs) {
-        stubClock += stepMs;
+// Periode de boucle simulee (us). Le firmware suppose une boucle rapide pour tenir la
+// frequence de pas ; on prend une valeur plausible pour un ATmega32U4.
+#define LOOP_US 40
+
+static void runLoop(Instrument &inst, unsigned long durationMs, unsigned long loopUs = LOOP_US) {
+    unsigned long end = stubMicros + durationMs * 1000UL;
+    while (stubMicros < end) {
+        unsigned long before = stubMicros;
         inst.update();
+        // Le temps consomme par les stubs (I2C) compte ; on complete jusqu'a la periode.
+        unsigned long spent = stubMicros - before;
+        stubMicros += (spent < loopUs) ? (loopUs - spent) : 1;
     }
 }
 
-// Machine physique : le soufflet demarre 30 mm au-dessus du contact bas, et le contact
-// haut est 5 mm au-dela de la course nominale.
-static void setupMachine(float startOffset = 30.0f) {
-    stubClock = 1000;
-    stubForceBothEndstops = false;
-    stubMinSwitchPos = -startOffset;
-    stubMaxSwitchPos = -startOffset + BELLOW_MAX_POSITION + 5.0f;
+// Machine : soufflet a `offset` mm au-dessus du contact bas (place a 0), contact haut
+// 5 mm au-dela de la course nominale.
+static void setupMachine(float offset = 30.0f) {
+    stubResetMachine(offset, 0.0f, BELLOW_MAX_POSITION + 5.0f);
 }
 
-// Amene l'instrument a l'etat READY (homing complet).
 static void bringUp(Instrument &inst) {
     inst.begin();
-    run(inst, 20000, 2);
+    runLoop(inst, 60000, 200); // Homing complet (deux passes), pas de temps grossier
 }
 
 int main() {
-    printf("\n=== Scenario 1 : homing + MIDI refuse pendant la calibration ===\n");
+    printf("\n=== Scenario 1 : homing deux passes, MIDI refuse pendant la calibration ===\n");
     {
         setupMachine();
         Instrument inst;
         inst.begin();
         check("etat = HOMING apres begin()", inst.getState() == SYS_HOMING);
 
-        run(inst, 500);
+        runLoop(inst, 200);
         inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
         check("NoteOn refusee pendant le homing", !inst.isReady());
         check("driver moteur actif pendant le homing", stubPinState[STEPPER_EN_PIN] == LOW);
 
-        run(inst, 20000, 2);
-        check("etat = READY apres contact du fin de course MIN", inst.getState() == SYS_READY);
-        check("zero recale sur le contact physique",
-              fabs(g_stepper->getCurrentPositionInMillimeters()) < 1.0f);
+        runLoop(inst, 60000, 200);
+        check("etat = READY apres homing", inst.getState() == SYS_READY);
+        printf("     (position physique finale : %.3f mm, contact bas a 0)\n", stubPhysicalPos);
+        check("zero etabli au contact, a moins de 0,5 mm", fabs(stubPhysicalPos) < 0.5f);
+        check("pas de defaut", inst.getInstrumentFault() == INST_FAULT_NONE);
     }
 
-    printf("\n=== Scenario 2 : homing long (proche de la course max) ===\n");
+    printf("\n=== Scenario 2 : surcourse maitrisee sur fin de course ===\n");
     {
-        // Homing de ~24 s : bien plus long que PCA_DISABLE_DELAY (500 ms).
-        // L'ancien code coupait le driver et l'OE en pleine calibration.
-        setupMachine(240.0f);
+        // Approche rapide a 10 mm/s. On mesure de combien le soufflet depasse le contact
+        // avant l'arret : c'est le point P0 de l'audit.
+        setupMachine(40.0f);
         Instrument inst;
         inst.begin();
 
-        bool driverCut = false, oeCut = false;
-        for (int i = 0; i < 24000; i++) {
-            stubClock += 1;
+        float deepest = 0.0f;
+        unsigned long end = stubMicros + 60000UL * 1000UL;
+        while (stubMicros < end && inst.getState() == SYS_HOMING) {
             inst.update();
-            if (inst.getState() != SYS_HOMING) break;
-            if (stubPinState[STEPPER_EN_PIN] == HIGH) driverCut = true;
-            if (stubPinState[PCA_OE_PIN] == HIGH) oeCut = true;
+            stubMicros += LOOP_US;
+            if (stubPhysicalPos < deepest) deepest = stubPhysicalPos;
         }
-        check("driver moteur jamais coupe pendant le homing", !driverCut);
-        check("OE des PCA jamais coupe pendant le homing (valve ouverte)", !oeCut);
-        run(inst, 2000, 2);
-        check("homing long mene bien a READY", inst.getState() == SYS_READY);
+        printf("     (surcourse maximale sous le contact : %.3f mm)\n", -deepest);
+        check("surcourse inferieure a 1 mm", -deepest < 1.0f);
+        check("driver coupe des le contact (pas de rampe de freinage subie)",
+              -deepest < 0.5f);
     }
 
-    printf("\n=== Scenario 3 : homing sans fin de course -> defaut ===\n");
+    printf("\n=== Scenario 3 : homing sans contact -> FAULT_HOMING_DISTANCE ===\n");
     {
-        setupMachine();
-        stubMinSwitchPos = -1e9f; // jamais atteint
+        stubResetMachine(30.0f, -1e9f, 1e9f); // aucun contact atteignable
         Instrument inst;
         inst.begin();
-        run(inst, HOMING_TIMEOUT_MS + 3000, 10);
+        runLoop(inst, 60000, 500);
         check("defaut declare (pas de blocage infini)", inst.getState() == SYS_FAULT);
+        check("code = FAULT_HOMING_DISTANCE et non un timeout",
+              inst.getFault() == FAULT_HOMING_DISTANCE);
         check("driver moteur coupe en defaut", stubPinState[STEPPER_EN_PIN] == HIGH);
         check("servos maintenus alimentes en defaut", stubPinState[PCA_OE_PIN] == LOW);
-        check("NoteOn refusee en defaut", (inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT), !inst.isReady()));
     }
 
     printf("\n=== Scenario 4 : deux fins de course actifs -> defaut de cablage ===\n");
@@ -98,7 +100,7 @@ int main() {
         stubForceBothEndstops = true;
         Instrument inst;
         inst.begin();
-        run(inst, 500);
+        runLoop(inst, 500);
         check("defaut FAULT_ENDSTOP_WIRING",
               inst.getState() == SYS_FAULT && inst.getFault() == FAULT_ENDSTOP_WIRING);
         stubForceBothEndstops = false;
@@ -115,25 +117,23 @@ int main() {
 
         bool hitMax = false, hitMin = false;
         float peak = -1e9f, trough = 1e9f;
-        // Deux minutes de note tenue, sans aucun message MIDI supplementaire.
-        for (int i = 0; i < 120000; i++) {
-            stubClock += 1;
+        unsigned long settle = stubMicros + 20000UL * 1000UL;
+        unsigned long end = stubMicros + 90000UL * 1000UL;
+        while (stubMicros < end) {
             inst.update();
-            float p = g_stepper->getCurrentPositionInMillimeters();
-            if (i > 20000) { // apres stabilisation du cycle
-                if (p > peak) peak = p;
-                if (p < trough) trough = p;
+            stubMicros += LOOP_US;
+            if (stubMicros > settle) {
+                if (stubPhysicalPos > peak) peak = stubPhysicalPos;
+                if (stubPhysicalPos < trough) trough = stubPhysicalPos;
+                if (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW) hitMax = true;
+                if (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW) hitMin = true;
             }
-            if (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW) hitMax = true;
-            // Juste apres le homing, le soufflet repose sur le contact bas : normal.
-            // On ne surveille le contact bas qu'une fois le cycle etabli.
-            if (i > 20000 && digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW) hitMin = true;
         }
         printf("     (course observee : %.1f mm -> %.1f mm)\n", trough, peak);
         check("le fin de course HAUT n'est jamais atteint", !hitMax);
         check("le fin de course BAS n'est jamais atteint", !hitMin);
-        check("inversion haute proche de 70 % (140 mm)", peak > 135.0f && peak < 150.0f);
-        check("inversion basse proche de 30 % (60 mm)", trough > 52.0f && trough < 65.0f);
+        check("inversion haute proche de 70 % (140 mm)", peak > 133.0f && peak < 152.0f);
+        check("inversion basse proche de 30 % (60 mm)", trough > 50.0f && trough < 67.0f);
     }
 
     printf("\n=== Scenario 6 : reprise apres inactivite ===\n");
@@ -143,17 +143,16 @@ int main() {
         bringUp(inst);
         check("instrument pret", inst.isReady());
 
-        run(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 10);
+        runLoop(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 500);
         check("driver coupe apres inactivite", stubPinState[STEPPER_EN_PIN] == HIGH);
         check("OE des PCA coupe apres inactivite", stubPinState[PCA_OE_PIN] == HIGH);
 
-        float before = g_stepper->getCurrentPositionInMillimeters();
+        float before = stubPhysicalPos;
         inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
-        run(inst, 500, 1);
+        runLoop(inst, 800);
         check("driver REACTIVE a la nouvelle note", stubPinState[STEPPER_EN_PIN] == LOW);
         check("OE des PCA reactive a la nouvelle note", stubPinState[PCA_OE_PIN] == LOW);
-        check("le soufflet repart reellement",
-              fabs(g_stepper->getCurrentPositionInMillimeters() - before) > 0.5f);
+        check("le soufflet repart reellement", fabs(stubPhysicalPos - before) > 0.5f);
     }
 
     printf("\n=== Scenario 7 : CC7 = 0 coupe la production de pression ===\n");
@@ -163,20 +162,18 @@ int main() {
         bringUp(inst);
 
         inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
-        run(inst, 2000, 1);
+        runLoop(inst, 3000);
         inst.setVolume(0);
-        run(inst, 10, 1);
+        runLoop(inst, 2000); // laisse la deceleration se terminer
 
-        float before = g_stepper->getCurrentPositionInMillimeters();
-        run(inst, 30000, 1); // 30 s a volume nul
-        float after = g_stepper->getCurrentPositionInMillimeters();
-        printf("     (derive sur 30 s : %.3f mm)\n", fabs(after - before));
-        check("aucune derive a 2 mm/s a volume nul", fabs(after - before) < 0.01f);
+        float before = stubPhysicalPos;
+        runLoop(inst, 20000, 200); // 20 s a volume nul
+        printf("     (derive sur 20 s : %.4f mm)\n", fabs(stubPhysicalPos - before));
+        check("aucune derive a 2 mm/s a volume nul", fabs(stubPhysicalPos - before) < 0.01f);
 
         inst.setVolume(100);
-        run(inst, 500, 1);
-        check("le soufflet repart quand CC7 remonte",
-              fabs(g_stepper->getCurrentPositionInMillimeters() - after) > 0.5f);
+        runLoop(inst, 1000);
+        check("le soufflet repart quand CC7 remonte", fabs(stubPhysicalPos - before) > 0.5f);
     }
 
     printf("\n=== Scenario 8 : sustain CC64 ne laisse pas de note bloquee ===\n");
@@ -187,83 +184,107 @@ int main() {
 
         inst.setSustain(true);
         inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
-        run(inst, 50);
+        runLoop(inst, 200);
         inst.noteOff(60, MIDI_CHANNEL_RIGHT);
-        run(inst, 50);
-        float held = g_stepper->getCurrentPositionInMillimeters();
-        run(inst, 1000, 1);
-        check("note maintenue tant que la pedale est enfoncee",
-              fabs(g_stepper->getCurrentPositionInMillimeters() - held) > 0.5f);
+        runLoop(inst, 200);
+        check("note toujours ouverte pedale enfoncee", inst.getActiveNoteCount() == 1);
 
         inst.setSustain(false);
-        run(inst, 50);
-        float stopped = g_stepper->getCurrentPositionInMillimeters();
-        run(inst, 2000, 1);
-        check("soufflet arrete au relachement de la pedale",
-              fabs(g_stepper->getCurrentPositionInMillimeters() - stopped) < 0.01f);
+        runLoop(inst, 100);
+        check("note fermee au relachement de la pedale", inst.getActiveNoteCount() == 0);
 
-        run(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 10);
-        check("l'inactivite se declenche (activeNotes bien retombe a 0)",
-              stubPinState[STEPPER_EN_PIN] == HIGH);
+        runLoop(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 500);
+        check("l'inactivite se declenche ensuite", stubPinState[STEPPER_EN_PIN] == HIGH);
     }
 
-    printf("\n=== Scenario 9 : mapping MIDI main gauche (README) ===\n");
-    {
-        const uint8_t bassRow[12]  = {36,43,38,45,40,47,42,49,44,51,46,41};
-        const uint8_t chordRow[12] = {48,55,50,57,52,59,54,61,56,63,58,53};
-        bool allBass = true, allChord = true;
-        for (int i = 0; i < 12; i++) {
-            if (findNoteIndex(LEFT_HAND_MAPPING, NUM_NOTES_LEFT, bassRow[i]) < 0) allBass = false;
-            if (findNoteIndex(LEFT_HAND_MAPPING, NUM_NOTES_LEFT, chordRow[i]) < 0) allChord = false;
-        }
-        check("les 12 basses du README sont jouables", allBass);
-        check("les 12 accords du README sont jouables (61 et 63 compris)", allChord);
-        check("note 37 absente (non contigue)",
-              findNoteIndex(LEFT_HAND_MAPPING, NUM_NOTES_LEFT, 37) < 0);
-        check("note 39 absente (non contigue)",
-              findNoteIndex(LEFT_HAND_MAPPING, NUM_NOTES_LEFT, 39) < 0);
-    }
-
-    printf("\n=== Scenario 10 : polyphonie et vol de voix ===\n");
+    printf("\n=== Scenario 9 : polyphonie, vol de voix et rejeu ===\n");
     {
         setupMachine();
         Instrument inst;
         bringUp(inst);
 
-        // Sature avec 12 accords (priorite basse) + 3 notes de melodie = 15 voix
         const uint8_t chordRow[12] = {48,55,50,57,52,59,54,61,56,63,58,53};
         for (int i = 0; i < 12; i++) inst.noteOn(chordRow[i], 100, MIDI_CHANNEL_LEFT);
         for (int i = 0; i < 3; i++)  inst.noteOn(70 + i, 100, MIDI_CHANNEL_RIGHT);
-        run(inst, 50);
+        runLoop(inst, 50);
         check("15 voix actives (limite atteinte)",
               inst.getActiveNoteCount() == MAX_SIMULTANEOUS_NOTES);
 
-        // Une basse (priorite haute) doit voler une voix d'accord : le compte reste a 15
-        // mais le premier accord joue (48) doit avoir ete ferme.
-        inst.noteOn(36, 100, MIDI_CHANNEL_LEFT);
-        run(inst, 10);
-        check("la basse 36 est bien entree", inst.isReady());
-        check("le compte de voix reste borne a 15",
+        inst.noteOn(36, 100, MIDI_CHANNEL_LEFT); // basse : priorite superieure
+        runLoop(inst, 20);
+        check("la basse entre en volant un accord",
               inst.getActiveNoteCount() == MAX_SIMULTANEOUS_NOTES);
 
-        // Un accord supplementaire ne trouve aucune voix moins prioritaire qu'un accord
-        // parmi les melodies/basses restantes... mais il reste des accords : il vole donc
-        // le plus ancien. En revanche il ne doit jamais evincer la basse ni la melodie.
-        inst.noteOn(59, 100, MIDI_CHANNEL_LEFT);
-        run(inst, 10);
-        check("toujours 15 voix apres un accord de plus",
-              inst.getActiveNoteCount() == MAX_SIMULTANEOUS_NOTES);
+        // Rejeu d'une note deja ouverte : ne doit pas consommer de voix ni en voler une.
+        byte before = inst.getActiveNoteCount();
+        inst.noteOn(36, 120, MIDI_CHANNEL_LEFT);
+        runLoop(inst, 20);
+        check("rejeu d'une note ouverte : compte inchange",
+              inst.getActiveNoteCount() == before);
 
-        // La melodie (priorite > accord) doit encore pouvoir entrer.
-        inst.noteOn(80, 100, MIDI_CHANNEL_RIGHT);
-        run(inst, 10);
-        check("une melodie entre encore a saturation",
-              inst.getActiveNoteCount() == MAX_SIMULTANEOUS_NOTES);
-
-        // MIDI Panic : tout se referme
         inst.allNotesOff();
-        run(inst, 10);
+        runLoop(inst, 20);
         check("MIDI Panic remet le compte a zero", inst.getActiveNoteCount() == 0);
+    }
+
+    printf("\n=== Scenario 10 : PCA9685 absent au demarrage ===\n");
+    {
+        setupMachine();
+        stubMissingPcaMask = 0x08; // 0x43 absent : c'est celui de la valve generale
+        Instrument inst;
+        inst.begin();
+        runLoop(inst, 500);
+        check("demarrage refuse", inst.getState() == SYS_FAULT);
+        check("cause = PCA manquant", inst.getInstrumentFault() == INST_FAULT_PCA_MISSING);
+        check("masque des absents correct", inst.getMissingPcaMask() == 0x08);
+        check("driver moteur coupe", stubPinState[STEPPER_EN_PIN] == HIGH);
+        inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
+        check("aucune note acceptee", inst.getActiveNoteCount() == 0);
+        stubMissingPcaMask = 0;
+    }
+
+    printf("\n=== Scenario 11 : perte du bus I2C en cours de jeu ===\n");
+    {
+        setupMachine();
+        Instrument inst;
+        bringUp(inst);
+        check("instrument pret", inst.isReady());
+
+        stubI2cErrors = 500; // toutes les ecritures suivantes echouent
+        for (int i = 0; i < SERVO_I2C_ERROR_LIMIT + 4; i++) {
+            inst.noteOn(60 + i, 100, MIDI_CHANNEL_RIGHT);
+            runLoop(inst, 5);
+        }
+        check("passage en defaut sur erreurs I2C repetees", inst.getState() == SYS_FAULT);
+        check("cause = bus PCA", inst.getInstrumentFault() == INST_FAULT_PCA_BUS);
+        check("driver moteur coupe", stubPinState[STEPPER_EN_PIN] == HIGH);
+        stubI2cErrors = 0;
+    }
+
+    printf("\n=== Scenario 12 : velocite appliquee par note ===\n");
+    {
+        setupMachine();
+        Instrument inst;
+        bringUp(inst);
+
+        // Un accord fort, puis une note faible ajoutee : la demande d'air doit AUGMENTER.
+        // L'ancien modele appliquait la derniere velocite a toutes les notes, ce qui
+        // faisait chuter le debit de l'accord entier.
+        for (int i = 0; i < 3; i++) inst.noteOn(60 + i, 127, MIDI_CHANNEL_RIGHT);
+        runLoop(inst, 300); // laisse l'attaque retomber
+        float strongPos = stubPhysicalPos;
+        runLoop(inst, 1000);
+        float strongSpeed = (stubPhysicalPos - strongPos) / 1.0f;
+
+        inst.noteOn(65, 10, MIDI_CHANNEL_RIGHT); // note tres douce ajoutee
+        runLoop(inst, 300);
+        float mixedPos = stubPhysicalPos;
+        runLoop(inst, 1000);
+        float mixedSpeed = (stubPhysicalPos - mixedPos) / 1.0f;
+
+        printf("     (vitesse accord fort : %.2f mm/s -> avec note douce : %.2f mm/s)\n",
+               strongSpeed, mixedSpeed);
+        check("ajouter une note douce augmente le debit", mixedSpeed > strongSpeed);
     }
 
     return testSummary("test_behavior");

@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        environment: [leonardo, leonardo_usbmidi]
+        environment: [leonardo_din, leonardo_usb, leonardo_din_usb]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

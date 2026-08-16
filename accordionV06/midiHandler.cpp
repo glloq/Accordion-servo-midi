@@ -25,7 +25,11 @@ USBMIDI_CREATE_INSTANCE(0, MIDI_USB);
 #endif
 
 MidiHandler::MidiHandler(Instrument& instr)
-    : instrument(instr) {}
+    : instrument(instr)
+#if MIDI_TRANSPORT_DIN && MIDI_TRANSPORT_USB
+    , preferUsb(false)
+#endif
+{}
 
 void MidiHandler::begin() {
 #if MIDI_TRANSPORT_DIN
@@ -43,22 +47,42 @@ void MidiHandler::begin() {
     #endif
 }
 
-void MidiHandler::update() {
-    processMIDI();
+// Lit un message sur le transport DIN. Retourne true si un message a ete traite.
+bool MidiHandler::readDin() {
+#if MIDI_TRANSPORT_DIN
+    if (!MIDI_DIN.read()) return false;
+    dispatch(MIDI_DIN.getType(), MIDI_DIN.getChannel(), MIDI_DIN.getData1(), MIDI_DIN.getData2());
+    return true;
+#else
+    return false;
+#endif
 }
 
-// Lit les transports actifs et fusionne les messages
-void MidiHandler::processMIDI() {
-#if MIDI_TRANSPORT_DIN
-    for (byte i = 0; i < MIDI_MAX_MESSAGES_PER_LOOP && MIDI_DIN.read(); i++) {
-        dispatch(MIDI_DIN.getType(), MIDI_DIN.getChannel(), MIDI_DIN.getData1(), MIDI_DIN.getData2());
-    }
-#endif
-
+// Lit un message sur le transport USB. Retourne true si un message a ete traite.
+bool MidiHandler::readUsb() {
 #if MIDI_TRANSPORT_USB
-    for (byte i = 0; i < MIDI_MAX_MESSAGES_PER_LOOP && MIDI_USB.read(); i++) {
-        dispatch(MIDI_USB.getType(), MIDI_USB.getChannel(), MIDI_USB.getData1(), MIDI_USB.getData2());
+    if (!MIDI_USB.read()) return false;
+    dispatch(MIDI_USB.getType(), MIDI_USB.getChannel(), MIDI_USB.getData1(), MIDI_USB.getData2());
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Traite AU PLUS un message par appel : le generateur de pas reprend la main entre chaque.
+void MidiHandler::update() {
+#if MIDI_TRANSPORT_DIN && MIDI_TRANSPORT_USB
+    // Alternance stricte : une rafale sur un transport ne peut pas affamer l'autre.
+    if (preferUsb) {
+        if (!readUsb()) readDin();
+    } else {
+        if (!readDin()) readUsb();
     }
+    preferUsb = !preferUsb;
+#elif MIDI_TRANSPORT_DIN
+    readDin();
+#else
+    readUsb();
 #endif
 }
 

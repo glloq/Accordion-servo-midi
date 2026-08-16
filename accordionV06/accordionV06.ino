@@ -23,6 +23,11 @@ void setup() {
 }
 
 void loop() {
+    // ORDRE IMPORTANT : midiHandler.update() ne traite qu'UN message, puis
+    // instrument.update() rend la main au generateur de pas. FlexyStepper ne produit
+    // qu'un pas par appel a processMovement() : enchainer plusieurs messages MIDI, et
+    // donc plusieurs ecritures I2C de ~110 us, avant de le servir ferait chuter la
+    // frequence de pas et decrocher le moteur.
     midiHandler.update();
     instrument.update();
 }
