@@ -10,8 +10,10 @@ Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
 >  il a pris chaud (probablement dans une voiture), il y a des morceaux de cire partout et les anches ne tienent plus => Ca va me prendre du temps a remettre en etat avant de pouvoir tester :/
 
  # choses a faire :
-- ajouter la gestion des pins oe de chaque pca pour desactiver les servos si non utilisé
-- ajouter un code avec un capteur et gerer la pression en direct ?
+- separer les pins OE de chaque PCA (aujourd'hui un seul OE pour les 4, valve comprise)
+- ajouter un capteur de pression et une regulation PI/PID (aujourd'hui tout est en boucle ouverte)
+- piloter le TMC2209 en UART (courant RMS, microsteps, StealthChop, detection de blocage)
+- alimenter les servos par bancs (fusible + condensateur + load switch par PCA)
 - plans 2D des planches bois 
 - plans 3D et stl des fichiers a imprimer
 - liste completes des materiaux
@@ -19,11 +21,19 @@ Transforme un accordéon acoustique en un instrument MIDI automatisé 🎹🎼
 ## 📌 Objectif
 
 Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par des servomoteurs et un moteur pas à pas, permettant de :
-- ✔ Lire et interpreter des messages MIDI via USB.
+- ✔ Lire et interpreter des messages MIDI (DIN/UART par défaut, USB natif en option).
 - ✔ Contrôler chaque note individuellement via des servos.
 - ✔ Simuler le jeu d’un accordéoniste avec un soufflet dynamique.
 - ✔ Gérer les notes et accords de la main droite et de la main gauche.
 - ✔ Réguler automatiquement le débit d’air via airFlowMultiplier (sans capteur de pression).
+
+> [!WARNING]
+> **À vérifier impérativement avant le premier essai mécanique :**
+> - `MICRO_STEP` dans `settings.h` doit correspondre au réglage **physique** du TMC2209
+>   (cavaliers MS1/MS2). En mode standalone, MS1=MS2=LOW donne souvent 1/8 et non 1/16.
+>   `STEPS_PER_MM` en est déduit : une erreur ici fausse la course d'un facteur 2 à 16.
+> - Les fins de course sont sur **D5 et D6**. Ne jamais les câbler sur D2/D3, qui sont
+>   SDA/SCL (bus I²C des PCA9685) sur Leonardo/Micro.
 
 
 ## Schema de principe
@@ -41,7 +51,7 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 - Moteur pas à pas NEMA 17 (24V, 1.8°/200 pas/tour)	=>  Actionne le soufflet
 - Driver TMC2209 (StealthChop)	=>  Contrôle précis du moteur pas à pas, silencieux
 - Alimentation 24V 5A	=>  Alimente le moteur pas à pas
-- 2x Fin de course optiques	=> Limite le déplacement du soufflet sans bruits mecanique
+- 2x Fin de course optiques	=> Limite le déplacement du soufflet sans bruits mecanique (D5 / D6)
   
 ### 🔹 Mécanique
 
@@ -55,7 +65,7 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 ## 📌 Logique du Code
 ### 🔹 Modules Principaux
 
-- MIDI Handler	=> Reçoit les messages MIDI via USB  
+- MIDI Handler	=> Routeur multi-transports (DIN/UART sur Serial1, USB natif en option)  
 - Instrument Controller	=> Interprète les notes et attribut les notes aux mains droite et gauche et gere le mouvement du soufflet
 - LeftHandController => gere les notes pour le canal midi 1 de la main gauche
 - RightHandControlelr => gere les notes pour le canal midi 2 de la main droite
@@ -83,23 +93,87 @@ Ce projet convertit un accordéon acoustique en un instrument MIDI piloté par d
 
 - ✔ Chaque note a un airFlowMultiplier (les graves consomment plus d'air).
 - ✔ Le moteur ajuste sa vitesse en fonction des notes jouées.
-- ✔ Si aucune note n’est active, le moteur s’arrête.
-- ✔ Si trop de notes sont activées (max 15 servos), elles sont jouées par priorité.
+- ✔ Si aucune note n’est active, le moteur s’arrête. `CC7 = 0` coupe réellement la pression.
+- ✔ La vélocité MIDI agit sur le **débit d'air** (attaque brève puis niveau tenu), pas sur
+  les servos : une valve d'anche est ouverte ou fermée, sans nuance possible.
 - ✔ Alternance du sens d’ouverture/fermeture du soufflet :
 
-    Si le soufflet dépasse 50% de son ouverture, le prochain cycle (nouvelle noteOn) se fait en sens inverse.
+    Le sens s'inverse à **70 % d'ouverture** et **30 % de fermeture**. Ces seuils sont
+    évalués **en continu** dans la boucle principale, pas seulement sur événement MIDI :
+    une note tenue fait donc osciller le soufflet sans jamais atteindre les fins de course.
+
+### 🔹 Polyphonie et priorité (max 15 notes)
+
+Quand la limite est atteinte, une note entrante ne prend la place que d'une note
+**strictement moins prioritaire**, la plus ancienne d'abord :
+
+| Priorité | Voix                                   |
+|---------:|----------------------------------------|
+|        3 | Basses fondamentales (rangée grave G)  |
+|        2 | Mélodie (main droite)                  |
+|        1 | Accords (rangée aiguë main gauche)     |
+
+Les notes retenues uniquement par la pédale de sustain sont sacrifiées en premier.
+Si aucune voix moins prioritaire n'existe, la note entrante est ignorée.
 
 ## 📌 Calibration et Sécurité
 
-✔ Calibration automatique (calibrateZero) :
+### 🔹 Machine à états
 
-- Ouvre la valve principale.
+```
+BOOT → SERVO_INIT → HOMING → READY ⇄ (inactivité)
+                       │        │
+                       └────────┴──→ FAULT
+```
+
+- Les `NoteOn` sont **refusées** tant que l'état n'est pas `READY` (init servos, homing,
+  défaut). Le MIDI Panic (CC120/CC123) reste accepté dans tous les états.
+- L'arrêt sur inactivité et la coupure de l'OE des PCA sont inhibés hors de `READY` :
+  couper le driver ou la valve pendant le homing bloquait le soufflet.
+
+### 🔹 Calibration automatique (non bloquante)
+
+- Ouvre la valve principale, active le driver.
 - Recule jusqu’à la butée fermée (réinitialisation du zéro).
-- Referme la valve et ajuste le point de départ.
+- Un fin de course déjà enfoncé au démarrage est détecté immédiatement.
 
-✔ Détection des limites :
+### 🔹 Défauts détectés
 
--  Fins de course physiques ou optiques.
+| Code                    | Cause                                                |
+|-------------------------|------------------------------------------------------|
+| `FAULT_HOMING_TIMEOUT`  | Butée basse non atteinte dans `HOMING_TIMEOUT_MS`     |
+| `FAULT_HOMING_DISTANCE` | Course > `HOMING_MAX_DISTANCE` sans contact           |
+| `FAULT_ENDSTOP_WIRING`  | Les deux fins de course actifs simultanément          |
+
+En défaut : moteur coupé, valve ouverte (pression libérée), toutes les notes fermées,
+servos maintenus alimentés pour que la valve tienne sa position. L'état est verrouillé.
+
+> [!NOTE]
+> La broche `OE` des PCA9685 ne coupe **que les sorties PWM**. Le rail +5 V des 59 servos
+> reste alimenté. Une vraie mise hors tension demanderait un load switch / MOSFET
+> high-side par banc de servos.
+
+## 📌 Compilation et tests
+
+```bash
+# Firmware (PlatformIO)
+pio run -e leonardo           # MIDI DIN sur Serial1 (défaut)
+pio run -e leonardo_usbmidi   # MIDI DIN + MIDI USB natif
+pio run -e leonardo -t upload
+
+# Tests de logique (g++ seul, ni AVR ni matériel)
+make -C test
+```
+
+Les tests rejouent le firmware sur une machine simulée : le stub `FlexyStepper` simule le
+déplacement réel et les fins de course sont **déduits de la position du soufflet**, comme
+des capteurs physiques. Ils couvrent le homing et ses défauts, le refus du MIDI pendant la
+calibration, l'inversion 30/70 % sur note tenue, la réactivation du driver après
+inactivité, `CC7 = 0`, le sustain, le mapping du clavier gauche et la priorité de voix.
+
+Le projet reste compilable tel quel dans l'IDE Arduino (dossier `accordionV06/`).
+Bibliothèques requises : *Adafruit PWM Servo Driver*, *MIDI Library*, *FlexyStepper*,
+plus *USB-MIDI* (lathoub) si `MIDI_TRANSPORT_USB` est activé.
 
 
 
