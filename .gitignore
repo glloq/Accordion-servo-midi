@@ -1,0 +1,11 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Tests natifs
+test/build/
+
+# Editeurs
+.vscode/
+.DS_Store

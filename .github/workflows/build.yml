@@ -1,0 +1,40 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Tests de logique : ni toolchain AVR ni materiel requis.
+  native-tests:
+    name: Tests natifs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compiler et executer la suite de tests
+        run: make -C test
+
+  # Compilation reelle du firmware pour la cible.
+  firmware:
+    name: Firmware (${{ matrix.environment }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [leonardo, leonardo_usbmidi]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+      - name: Installer PlatformIO
+        run: pip install --upgrade platformio
+      - name: Compiler
+        run: pio run -e ${{ matrix.environment }}

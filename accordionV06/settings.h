@@ -1,159 +1,155 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
-#include <Arduino.h>  // Assure la prise en charge de `uint8_t`
+#include <Arduino.h>   // Assure la prise en charge de `uint8_t`
+#include "noteMapping.h" // Table des notes, adresses PCA et angles servos
+
 //===========================================================================================================
-// === CONFIGURATION GÉNÉRALE ===
+// === CONFIGURATION GENERALE ===
 //===========================================================================================================
 
 // === CONFIGURATION DES CANAUX MIDI ===
-#define MIDI_CHANNEL_LEFT 1  // Canal MIDI dédié à la main gauche
-#define MIDI_CHANNEL_RIGHT 2 // Canal MIDI dédié à la main droite
+#define MIDI_CHANNEL_LEFT 1  // Canal MIDI dedie a la main gauche
+#define MIDI_CHANNEL_RIGHT 2 // Canal MIDI dedie a la main droite
 
+// === TRANSPORTS MIDI ===
+// Definissables depuis la ligne de compilation (-DMIDI_TRANSPORT_USB=1).
+// DIN  : MIDI serie classique sur Serial1 (broches 0/1 du Leonardo).
+// USB  : MIDI USB natif du Leonardo/Micro, necessite la bibliotheque "USB-MIDI" (lathoub).
+//        Desactive par defaut pour ne pas imposer la dependance a l'IDE Arduino.
+#ifndef MIDI_TRANSPORT_DIN
+#define MIDI_TRANSPORT_DIN 1
+#endif
+#ifndef MIDI_TRANSPORT_USB
+#define MIDI_TRANSPORT_USB 0
+#endif
 
 #define DEBUG false
 
-// Délai de debounce pour les fins de course (en millisecondes)
+// Frequence du bus I2C des PCA9685. Le PCA9685 supporte 1 MHz ; 400 kHz raccourcit
+// nettement le temps de commande des 59 servos. Repasser a 100000 en cas de bus long
+// ou d'erreurs de transmission.
+#define I2C_CLOCK_HZ 400000L
+
+// Delai de debounce pour les fins de course (en millisecondes)
 #define ENDSTOP_DEBOUNCE_MS 50
+
+// Nombre maximum de notes simultanees (protection alimentation 5V/10A)
+#define MAX_SIMULTANEOUS_NOTES 15
 
 //===========================================================================================================
 //==== Gestion du moteur pas a pas
 //===========================================================================================================
 // === CONFIGURATION DU SOUFFLET ===
-// ➜ Définition des vitesses et accélérations minimales et maximales
-//voici la vitesse minimale pour activer la note la plus grave coté clavier
-// la vitesse normale permet de definir un deplacement minimum (voir pour unité ?? )
-#define NORMAL_SPEED 10 // Vitesse minimale de déplacement avec une seule note active en mm/s
+// Vitesse de reference pour une seule note active (airFlowMultiplier = 1.0) en mm/s.
+#define NORMAL_SPEED 10
 
-// ➜ Plage de mouvement du soufflet (position en mm)
+// Plage de mouvement du soufflet (position en mm)
 #define BELLOW_MIN_POSITION 0
 #define BELLOW_MAX_POSITION 200 // ouverture maximum du soufflet en mm (jusqu'au fin de course)
 
-// === SEUILS DE SÉCURITÉ DU SOUFFLET ===
-// Permet d’inverser le sens du soufflet avant d'atteindre les FDC
-#define BELLOW_REVERSE_THRESHOLD_OPEN 0.7  // Inversion à 70% d'ouverture
-#define BELLOW_REVERSE_THRESHOLD_CLOSE 0.3 // Inversion à 30% de fermeture
-
+// === SEUILS DE SECURITE DU SOUFFLET ===
+// Inversion du sens AVANT d'atteindre les fins de course. Ces seuils sont evalues en
+// continu dans BellowController::update(), pas uniquement sur evenement MIDI.
+#define BELLOW_REVERSE_THRESHOLD_OPEN 0.7f  // Inversion a 70% d'ouverture
+#define BELLOW_REVERSE_THRESHOLD_CLOSE 0.3f // Inversion a 30% de fermeture
 
 // === CONFIGURATION DES FINS DE COURSE ===
-#define LIMIT_SWITCH_MIN_PIN 2 // Fin de course bas (fermeture complète)
-#define LIMIT_SWITCH_MAX_PIN 3 // Fin de course haut (ouverture maximale)
+// ATTENTION : sur Arduino Leonardo / Micro, D2 et D3 sont SDA et SCL (bus I2C des PCA9685).
+// Les fins de course ne doivent donc JAMAIS utiliser ces broches.
+#define LIMIT_SWITCH_MIN_PIN 5 // Fin de course bas (fermeture complete)
+#define LIMIT_SWITCH_MAX_PIN 6 // Fin de course haut (ouverture maximale)
 
-// === CONFIGURATION MOTEURS
+// === CONFIGURATION MOTEURS ===
 // Vitesses minimale et maximale (en mm/s)
-#define STEPPER_MIN_SPEED 2 
+#define STEPPER_MIN_SPEED 2
 #define STEPPER_MAX_SPEED 300
-// Accélérations minimale et maximale (en mm/s²)
+// Accelerations minimale et maximale (en mm/s^2)
 #define STEPPER_MIN_ACCEL 5
 #define STEPPER_MAX_ACCEL 100
 
-// Temps avant de désactiver le moteur et fermer la valve du soufflet (en millisecondes)
-#define BELLOW_INACTIVITY_TIMEOUT 60000 // 1 minutes (120000 ms)
+// Frequence de pas maximale reellement tenable par le MCU avec FlexyStepper.
+// Sur AVR 16 MHz, au-dela de ~10 kHz la generation de pas decroche.
+// BellowController borne la vitesse a STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM.
+#define STEPPER_MAX_STEP_RATE_HZ 10000.0f
 
-// Broches utilisées pour le moteur pas à pas en Step/Dir 
+// Temps avant de desactiver le moteur et fermer la valve du soufflet (en millisecondes)
+#define BELLOW_INACTIVITY_TIMEOUT 60000UL // 1 minute
+
+// Broches utilisees pour le moteur pas a pas en Step/Dir
 #define STEPPER_DIR_PIN 9     // Direction
 #define STEPPER_STEP_PIN 10   // Step
 #define STEPPER_EN_PIN 11     // Enable (actif bas)
 
-#define STEP_PER_MM 25 // nombre de pas par mm (pour une vis pas 16mm avec rapport de reduction 1/2 avec les poulies)
-#define MICRO_STEP 16 // micro pas pour limiter le bruit du moteur 
+//-----------------------------------------------------------------------------------------
+// === PARAMETRES MECANIQUES DE LA TRANSMISSION ===
+// STEPS_PER_MM est calcule, plus code en dur : une erreur ici se traduit directement par
+// une erreur de course d'un facteur MICRO_STEP (jusqu'a x16).
+//
+// !! MICRO_STEP doit correspondre au reglage PHYSIQUE du TMC2209 (cavaliers MS1/MS2,
+// ou configuration UART). En mode standalone, MS1=MS2=LOW donne 1/8 sur la plupart des
+// modules TMC2209, PAS 1/16. Verifier la doc du module avant le premier essai mecanique.
+#define MOTOR_STEPS_PER_REV 200  // Moteur NEMA17 1.8 deg => 200 pas/tour
+#define MICRO_STEP 16            // Micro-pas du driver (doit refleter le cablage MS1/MS2)
+#define SCREW_LEAD_MM 16.0f      // Pas de la tige filetee : avance en mm par tour de vis
+#define GEAR_RATIO 2.0f          // Reduction poulies 1/2 : 2 tours moteur = 1 tour de vis
 
+// Pas par millimetre reellement envoyes au driver.
+// Ex. 200 * 16 * 2 / 16 = 400 pas/mm.
+#define STEPS_PER_MM (((float)MOTOR_STEPS_PER_REV * (float)MICRO_STEP * GEAR_RATIO) / SCREW_LEAD_MM)
+//-----------------------------------------------------------------------------------------
+
+// === CALIBRATION (HOMING) ===
+#define HOMING_SPEED 10.0f            // Vitesse de recherche du zero en mm/s
+#define HOMING_MAX_DISTANCE 250.0f    // Course max autorisee avant declaration de defaut (mm)
+#define HOMING_TIMEOUT_MS 45000UL     // Duree max du homing (doit couvrir HOMING_MAX_DISTANCE / HOMING_SPEED)
 
 //===========================================================================================================
-// === Gestion des notes / servomoteurs 
+// === Gestion des notes / servomoteurs
 //===========================================================================================================
+// La table des notes (NoteConfig, RIGHT_HAND_MAPPING, LEFT_HAND_MAPPING), les adresses des
+// PCA9685 et les angles servos sont definis dans noteMapping.h.
 
-
-// ➜ Définition des plages de notes pour chaque main
-#define FIRST_NOTE_RIGHT 54  // Fa#3 en MIDI (Main Droite)
-#define FIRST_NOTE_LEFT 36   // Do2 en MIDI (Main Gauche)
-#define NUM_NOTES_RIGHT 34
-#define NUM_NOTES_LEFT 24
+// === REPONSE A LA VELOCITE ===
+// La velocite n'agit pas sur les servos (une valve est ouverte ou fermee) mais sur la
+// demande d'air : attaque breve plus franche, puis niveau tenu proportionnel.
+//   facteurTenu   = VELOCITY_SUSTAIN_MIN + (1 - VELOCITY_SUSTAIN_MIN) * velocity/127
+//   facteurAttaque = facteurTenu * (1 + VELOCITY_ATTACK_BOOST * velocity/127)
+#define VELOCITY_SUSTAIN_MIN 0.60f  // Facteur de debit pour velocity = 1
+#define VELOCITY_ATTACK_BOOST 0.50f // Surcroit de debit pendant l'attaque (a velocity = 127)
+#define VELOCITY_ATTACK_MS 120UL    // Duree de la phase d'attaque
 
 // === CONFIGURATION DES SERVOMOTEURS ===
-// ➜ Angles standardisés pour tous les servos (initilaisé a 90 +/- 40° en fonction du sens d'ouverture openDirection)
-#define SERVO_CLOSED_ANGLE 130 // Angle de fermeture (valve fermée)
-#define SERVO_CLOSED_ANGLE_MIRROR 50 // Angle de fermeture (valve fermée) 
-#define SERVO_OPEN_ANGLE 40    // Angle d’ouverture (valve ouverte)
+// Frequence des servomoteurs (50Hz recommande pour la plupart des servos)
+#define SERVO_PWM_FREQUENCY 50
+// Delai avant desactivation des PCA apres la DERNIERE commande servo (en millisecondes).
+// Compte a partir du dernier setServoAngle() et non de la derniere note : cela garantit
+// qu'un servo (notamment la valve generale) a le temps d'atteindre sa position avant que
+// l'OE ne coupe le signal PWM.
+#define PCA_DISABLE_DELAY 500
+// Espacement entre servos lors de la fermeture initiale, pour eviter un appel de courant
+// simultane des 59 servos au demarrage (en millisecondes).
+#define SERVO_INIT_STAGGER_MS 15
 
-//-----------------------------------------------------------------------------------------
-// Fréquence des servomoteurs (50Hz recommandé pour la plupart des servos)
-#define SERVO_PWM_FREQUENCY 50 
-// Délai avant désactivation des PCA après la dernière note jouée (en millisecondes)
-#define  PCA_DISABLE_DELAY  500 //ms pour desactiver l'alim des servo 
 // Valeurs standard pour les positions des servos
 #define SERVO_MIN_ANGLE 0    // Angle minimum du servo
 #define SERVO_MAX_ANGLE 180  // Angle maximum du servo
 
-// Plage PWM correspondant aux angles (adapté aux servos 50Hz)
-#define SERVO_MIN_PWM 150   // Correspond à ~0° (PWM bas)
-#define SERVO_MAX_PWM 600   // Correspond à ~180° (PWM haut)
-//-----------------------------------------------------------------------------------------
+// Plage PWM correspondant aux angles (adapte aux servos 50Hz)
+#define SERVO_MIN_PWM 150   // Correspond a ~0 deg (PWM bas)
+#define SERVO_MAX_PWM 600   // Correspond a ~180 deg (PWM haut)
 
-// === CONFIGURATION DE LA VALVE GÉNÉRALE ===
-// ➜ Utilisée uniquement pour les déplacements sans notes actives (calibrage)
-#define VALVE_PCA_ADDRESS PCA_TAB[3]  // Adresse du PCA dédié à la valve
-#define VALVE_PCA_PIN 15              // Numéro du canal PCA => broche 16 du 4 eme PCA
-#define VALVE_PCA_ANGLE_OPEN 70
-#define VALVE_PCA_ANGLE_CLOSE 120
+// === CONFIGURATION DE LA VALVE GENERALE ===
+// VALVE_PCA_ADDRESS / VALVE_PCA_PIN / VALVE_PCA_ANGLE_* sont definis dans noteMapping.h,
+// avec l'allocation des canaux PCA.
 
-// === CONFIGURATION DES PCA9685 ===
-// ➜ Adresses I2C des 4 PCA9685 utilisés
-#define NUM_PCA_TOTAL 4
-const uint8_t PCA_TAB[NUM_PCA_TOTAL] = {0x40, 0x41, 0x42, 0x43};
-// ➜ Pins utilisé pour la broche OE des 4 PCA9685 utilisés (pour reduire le bruit des servomoteur)
-//const uint8_t PCA_OE_PIN[NUM_PCA_TOTAL] = {4, 5, 6, 7};//=> voir pour utiliser 1 pin  pour les 4 si trop complexe ?
-#define PCA_OE_PIN 4 // simplification, un seul pin pour tout les pca 
-
-// === STRUCTURE DE CONFIGURATION DES SERVOMOTEURS ===
-struct ServoConfig {
-    uint8_t pcaAddress;      // Adresse I2C du PCA9685
-    uint8_t channel;         // Canal PCA (0-15)
-    float airFlowMultiplier; // Facteur de débit d’air (influence le mouvement du soufflet)
-    uint8_t closedPosition;  // Position fermée (angle en degrés)
-    bool openDirection;      // Sens d’ouverture (true = normal, false = inversé)
-};
-
-// === MAPPING DES NOTES POUR LA MAIN DROITE ===
-// ➜ Répartition sur les PCA pour optimiser l'activation des servos
-const ServoConfig RIGHT_HAND_MAPPING[NUM_NOTES_RIGHT] = {
-    // Premier bloc de 18 servos (PCA 0x40)
-    { PCA_TAB[0], 0, 1.00, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 1, 0.98, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 2, 0.96, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 3, 0.94, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 4, 0.92, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 5, 0.90, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 6, 0.88, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 7, 0.86, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 8, 0.84, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 9, 0.82, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 10, 0.80, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 11, 0.78, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 12, 0.76, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 13, 0.74, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[0], 14, 0.72, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[0], 15, 0.70, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[3], 13, 0.68, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[3], 14, 0.66, SERVO_CLOSED_ANGLE, true},
-
-    // Deuxième bloc de 16 servos (PCA 0x41)
-    { PCA_TAB[1], 0, 0.66, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 1, 0.66, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 2, 0.64, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 3, 0.62, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 4, 0.60, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 5, 0.58, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 6, 0.56, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 7, 0.54, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 8, 0.52, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 9, 0.50, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 10, 0.48, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 11, 0.46, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 12, 0.44, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 13, 0.42, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[1], 14, 0.40, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[1], 15, 0.38, SERVO_CLOSED_ANGLE_MIRROR, false}
-};
-// === MAPPING DES NOTES POUR LA MAIN GAUCHE ===
-const ServoConfig LEFT_HAND_MAPPING[NUM_NOTES_LEFT] = {
-      // ➜ premier bloc de 12  servos
-    { PCA_TAB[2], 0, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 1, 1.0, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[2], 2, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 3, 1.0, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[2], 4, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 5, 1.0, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[2], 6, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 7, 1.0, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[2], 8, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 9, 1.0, SERVO_CLOSED_ANGLE, true},
-    { PCA_TAB[2], 10, 1.0, SERVO_CLOSED_ANGLE, true}, { PCA_TAB[2], 11, 1.0, SERVO_CLOSED_ANGLE, true},
-      // ➜ second bloc de 12  servos
-    { PCA_TAB[2], 12, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[2], 13, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[2], 14, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[2], 15, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[3], 1, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[3], 2, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[3], 3, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[3], 4, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[3], 5, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[3], 6, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false},
-    { PCA_TAB[3], 7, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}, { PCA_TAB[3], 8, 1.0, SERVO_CLOSED_ANGLE_MIRROR, false}
-};
+// === BROCHE OE DES PCA9685 ===
+// Une seule broche pilote l'OE des 4 PCA9685 (simplification du cablage).
+// ATTENTION : OE ne coupe QUE les sorties PWM du PCA9685. Le rail +5V des 59 servos reste
+// alimente. Pour une vraie mise hors tension il faudrait un load switch / MOSFET high-side
+// en amont de chaque banc de servos.
+// Consequence : la valve generale partage cet OE avec toutes les notes. Instrument ne coupe
+// l'OE qu'a l'etat READY/FAULT et seulement PCA_DISABLE_DELAY apres la derniere commande.
+#define PCA_OE_PIN 4
 
 #endif

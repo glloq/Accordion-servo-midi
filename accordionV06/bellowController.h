@@ -6,52 +6,85 @@
 #include <FlexyStepper.h>
 #include "servoController.h"
 
-// États de la machine à états pour le calibrage
-enum CalibrationState {
-    CALIB_IDLE,       // Pas de calibration en cours
-    CALIB_MOVING      // En train de chercher le fin de course
+// Etats du soufflet
+enum BellowState {
+    BELLOW_INIT,   // Avant begin()
+    BELLOW_HOMING, // Recherche du zero en cours
+    BELLOW_READY,  // Pret a produire de la pression
+    BELLOW_FAULT   // Defaut verrouille : moteur coupe, valve ouverte
+};
+
+// Codes de defaut
+enum BellowFault {
+    FAULT_NONE = 0,
+    FAULT_HOMING_TIMEOUT,  // Le fin de course MIN n'a pas ete atteint a temps
+    FAULT_HOMING_DISTANCE, // Course maximale depassee sans atteindre le fin de course
+    FAULT_ENDSTOP_WIRING   // Les deux fins de course actifs simultanement
 };
 
 class BellowController {
 public:
-    // Constructeur prenant un ServoController en paramètre
+    // Constructeur prenant un ServoController en parametre
     BellowController(ServoController &servoCtrl);
 
-    void begin();         // Initialise le soufflet et le moteur pas à pas
-    void update();        // Met à jour la position et vérifie les fins de course
+    void begin();  // Initialise le moteur pas a pas et lance le homing
+    void update(); // Machine a etats : homing, inversion 30/70%, fins de course, pas moteur
 
-    void updateSpeed(float totalAirFlow); // Ajuste la vitesse du soufflet en fonction du débit d'air
-    void updateVolume(byte volume);       // Met à jour le volume pour moduler la vitesse du soufflet
-    void startCalibration();              // Démarre le calibrage (non-bloquant)
-    void stopWithDecay();                 // Arrêt progressif
+    // Demande d'air courante.
+    //   airDemand      : somme des airFlowMultiplier des notes actives
+    //   velocityFactor : facteur de dynamique issu de la velocite MIDI (voir Instrument)
+    void setAirDemand(float airDemand, float velocityFactor);
+    void setVolume(byte volumeValue);         // CC7  (volume principal)
+    void setExpression(byte expressionValue); // CC11 (expression)
+
+    void startHoming();     // (Re)lance la calibration, non bloquante
+    void stopAndDisable();  // Arret + coupure du driver (mise au repos)
 
     void openValve();  // Ouvre la valve d'air
     void closeValve(); // Ferme la valve d'air
 
-    bool isCalibrating() const { return calibState != CALIB_IDLE; }
+    bool isHoming() const { return state == BELLOW_HOMING; }
+    bool isReady() const { return state == BELLOW_READY; }
+    bool hasFault() const { return state == BELLOW_FAULT; }
+    BellowFault getFault() const { return fault; }
+    void clearFault(); // Acquitte un defaut et relance un homing
 
 private:
-    ServoController &servoController; // Référence vers le contrôleur des servos
-    FlexyStepper stepper;             // Moteur pas à pas pour contrôler le soufflet
+    ServoController &servoController; // Reference vers le controleur des servos
+    FlexyStepper stepper;             // Moteur pas a pas pour controler le soufflet
 
-    bool valveOpen;         // Indique si la valve est ouverte
-    bool movingDirection;   // true = ouverture, false = fermeture
-    bool motorRunning;      // Indique si le moteur est en mouvement
-    int16_t currentSpeed;   // Vitesse actuelle du soufflet
-    byte volume;            // Volume actuel (0-127)
-    float lastTotalAirFlow; // Dernier débit d'air connu (pour updateVolume)
+    BellowState state;
+    BellowFault fault;
 
-    // Machine à états pour calibration non-bloquante
-    CalibrationState calibState;
-    void updateCalibration();  // Mise à jour de la calibration
+    bool valveOpen;       // Indique si la valve est ouverte
+    bool movingDirection; // true = ouverture, false = fermeture
+    bool motorRunning;    // Une consigne de pression est active
+    bool motorEnabled;    // Etat de la broche ENABLE du driver (actif bas)
+
+    float airDemand;      // Derniere demande d'air connue
+    float velocityFactor; // Dernier facteur de dynamique connu
+    byte volume;          // CC7  (0-127)
+    byte expression;      // CC11 (0-127)
+    float maxSpeed;       // Vitesse max reellement tenable (bornee par le debit de pas)
+
+    uint32_t homingStartTime;
 
     // Debounce des fins de course
     uint32_t lastEndstopMinTime;
     uint32_t lastEndstopMaxTime;
-    bool lastEndstopMinState;
-    bool lastEndstopMaxState;
+    bool rawEndstopMin, rawEndstopMax;       // Dernier niveau lu
+    bool stableEndstopMin, stableEndstopMax; // Niveau stabilise (true = actif)
 
-    void checkEndStops();  // Vérifie si le soufflet atteint un fin de course
+    void updateEndstops();     // Debounce des deux fins de course
+    void updateHoming();       // Progression du homing + detection de defauts
+    void updateDirection();    // Inversion 30/70%, evaluee a chaque tour de boucle
+    void checkEndStops();      // Recalage et inversion sur fin de course (etat READY)
+    void applyDemand();        // Recalcule vitesse et cible depuis la demande courante
+    void stopPressure();       // Stoppe le mouvement sans couper le driver
+    void retarget();           // Envoie la cible correspondant a movingDirection
+    void enableMotor();        // Active le driver (ENABLE bas)
+    void disableMotor();       // Coupe le driver (ENABLE haut)
+    void setFault(BellowFault code);
 };
 
 #endif
