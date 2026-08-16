@@ -8,6 +8,7 @@ HandController::HandController(ServoController &servoCtrl, const NoteConfig *map
         noteStates[i] = false;
         sustainedNotes[i] = false;
         noteSeq[i] = 0;
+        noteVelocity[i] = 0;
     }
 }
 
@@ -27,11 +28,11 @@ bool HandController::isNoteActive(byte note) const {
 byte HandController::priorityOf(byte note) const {
     int8_t index = findNoteIndex(mapping, numNotes, note);
     if (index < 0) return 0;
-    return mapping[index].priority;
+    return notePriorityAt(mapping, (uint8_t)index);
 }
 
 // === ACTIVATION D'UNE NOTE ===
-float HandController::noteOn(byte note, uint16_t seq) {
+float HandController::noteOn(byte note, byte velocity, uint16_t seq) {
     int8_t index = findNoteIndex(mapping, numNotes, note);
     if (index < 0) return 0.0f;
 
@@ -39,23 +40,50 @@ float HandController::noteOn(byte note, uint16_t seq) {
     // simplement une note tenue par le clavier : pas de double comptage du debit d'air.
     if (noteStates[index]) {
         sustainedNotes[index] = false;
+        // Rafraichir l'anciennete : sans cela une note tout juste rejouee restait la plus
+        // ancienne du tableau et pouvait etre volee immediatement apres.
+        noteSeq[index] = seq;
+        noteVelocity[index] = velocity;
         return 0.0f;
     }
 
-    const NoteConfig &config = mapping[index];
+    NoteConfig config;
+    loadNoteConfig(mapping, (uint8_t)index, config);
     servoController.setServoAngle(config.pcaAddress, config.channel, openAngleFor(config));
 
     noteStates[index] = true;
     sustainedNotes[index] = false;
     noteSeq[index] = seq;
+    noteVelocity[index] = velocity;
     activeCount++;
 
     return config.airFlowMultiplier;
 }
 
+// === DEMANDE D'AIR PONDEREE PAR LA VELOCITE ===
+float HandController::weightedAirFlow() const {
+    float sum = 0.0f;
+    for (byte i = 0; i < numNotes; i++) {
+        if (!noteStates[i]) continue;
+        sum += noteAirFlowAt(mapping, i) * velocitySustainWeight(noteVelocity[i]);
+    }
+    return sum;
+}
+
+float HandController::airFlowOfIndex(byte index) const {
+    if (index >= numNotes) return 0.0f;
+    return noteAirFlowAt(mapping, index);
+}
+
+byte HandController::velocityOfIndex(byte index) const {
+    if (index >= numNotes) return 0;
+    return noteVelocity[index];
+}
+
 // === FERMETURE INTERNE D'UNE VALVE ===
 void HandController::closeIndex(byte index) {
-    const NoteConfig &config = mapping[index];
+    NoteConfig config;
+    loadNoteConfig(mapping, index, config);
     servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
     noteStates[index] = false;
     sustainedNotes[index] = false;
@@ -68,7 +96,7 @@ float HandController::noteOff(byte note) {
     if (index < 0) return 0.0f;
     if (!noteStates[index]) return 0.0f;
 
-    float airFlow = mapping[index].airFlowMultiplier;
+    float airFlow = noteAirFlowAt(mapping, (uint8_t)index);
     closeIndex((byte)index);
     return airFlow;
 }
@@ -77,7 +105,7 @@ float HandController::noteOff(byte note) {
 float HandController::releaseIndex(byte index) {
     if (index >= numNotes || !noteStates[index]) return 0.0f;
 
-    float airFlow = mapping[index].airFlowMultiplier;
+    float airFlow = noteAirFlowAt(mapping, index);
     closeIndex(index);
     return airFlow;
 }
@@ -96,7 +124,7 @@ float HandController::releaseSustained(byte &releasedCount) {
 
     for (byte i = 0; i < numNotes; i++) {
         if (noteStates[i] && sustainedNotes[i]) {
-            airFlow += mapping[i].airFlowMultiplier;
+            airFlow += noteAirFlowAt(mapping, i);
             closeIndex(i);
             releasedCount++;
         }
@@ -112,14 +140,15 @@ bool HandController::findStealCandidate(byte maxPriority, byte &outIndex, byte &
     for (byte i = 0; i < numNotes; i++) {
         if (!noteStates[i]) continue;
 
-        byte priority = mapping[i].priority;
+        byte priority = notePriorityAt(mapping, i);
         if (priority >= maxPriority) continue; // Jamais voler une voix aussi importante
 
         // Une note deja relachee au clavier et seulement retenue par la pedale est la
         // premiere sacrifiee : on la traite comme la priorite la plus basse possible.
         byte effective = sustainedNotes[i] ? 0 : priority;
 
-        if (!found || effective < outPriority || (effective == outPriority && noteSeq[i] < outSeq)) {
+        if (!found || effective < outPriority ||
+            (effective == outPriority && seqIsOlder(noteSeq[i], outSeq))) {
             outIndex = i;
             outPriority = effective;
             outSeq = noteSeq[i];
@@ -133,7 +162,8 @@ bool HandController::findStealCandidate(byte maxPriority, byte &outIndex, byte &
 void HandController::allNotesOff() {
     for (byte i = 0; i < numNotes; i++) {
         if (noteStates[i]) {
-            const NoteConfig &config = mapping[i];
+            NoteConfig config;
+            loadNoteConfig(mapping, i, config);
             servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
         }
         noteStates[i] = false;
@@ -147,7 +177,8 @@ void HandController::allNotesOff() {
 // appel de courant que l'alimentation 5V/10A ne peut pas encaisser.
 void HandController::closeAllServos() {
     for (byte i = 0; i < numNotes; i++) {
-        const NoteConfig &config = mapping[i];
+        NoteConfig config;
+        loadNoteConfig(mapping, i, config);
         servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
         noteStates[i] = false;
         sustainedNotes[i] = false;

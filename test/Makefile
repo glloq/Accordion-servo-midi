@@ -13,12 +13,21 @@ BUILD_DIR = build
 INCLUDES = -I. -Istubs -I$(SRC_DIR)
 
 FIRMWARE_SRC = \
+	$(SRC_DIR)/noteMapping.cpp \
 	$(SRC_DIR)/servoController.cpp \
 	$(SRC_DIR)/handController.cpp \
 	$(SRC_DIR)/bellowController.cpp \
-	$(SRC_DIR)/instrument.cpp
+	$(SRC_DIR)/instrument.cpp \
+	$(SRC_DIR)/midiHandler.cpp
 
-BINARIES = $(BUILD_DIR)/test_note_mapping $(BUILD_DIR)/test_behavior
+STUB_SRC = stubs/stubs.cpp stubs/stubs_io.cpp
+
+BINARIES = \
+	$(BUILD_DIR)/test_note_mapping \
+	$(BUILD_DIR)/test_stepper_stop \
+	$(BUILD_DIR)/test_timing \
+	$(BUILD_DIR)/test_behavior \
+	$(BUILD_DIR)/test_behavior_progmem
 
 .PHONY: all test clean
 all: test
@@ -31,12 +40,23 @@ test: $(BINARIES)
 	done
 	@echo "Tous les tests sont passes."
 
-# test_note_mapping ne depend que de noteMapping.h (aucun stub necessaire)
-$(BUILD_DIR)/test_note_mapping: test_note_mapping.cpp $(SRC_DIR)/noteMapping.h | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -I. -I$(SRC_DIR) $< -o $@
+# test_note_mapping ne depend que de noteMapping.h/.cpp (aucun stub necessaire)
+$(BUILD_DIR)/test_note_mapping: test_note_mapping.cpp $(SRC_DIR)/noteMapping.cpp | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I. -I$(SRC_DIR) $^ -o $@
 
-$(BUILD_DIR)/test_behavior: test_behavior.cpp stubs/stubs.cpp $(FIRMWARE_SRC) | $(BUILD_DIR)
+$(BUILD_DIR)/test_stepper_stop: test_stepper_stop.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+$(BUILD_DIR)/test_timing: test_timing.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+$(BUILD_DIR)/test_behavior: test_behavior.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+# Rejoue toute la suite de comportement en compilant le CHEMIN DE CODE AVR (tables en
+# PROGMEM, acces via pgm_read_*). Verifie qu'aucun acces direct aux tables n'a survecu.
+$(BUILD_DIR)/test_behavior_progmem: test_behavior.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DARDUINO_ARCH_AVR $(INCLUDES) $^ -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

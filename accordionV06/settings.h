@@ -31,7 +31,11 @@
 // ou d'erreurs de transmission.
 #define I2C_CLOCK_HZ 400000L
 
-// Delai de debounce pour les fins de course (en millisecondes)
+// Delai de debounce pour les fins de course (en millisecondes).
+// ATTENTION : ce delai ne retarde JAMAIS l'arret. Le contact brut coupe immediatement le
+// driver ; le debounce ne sert qu'a decider ensuite si le contact etait reel (recalage +
+// inversion) ou parasite (reprise). A 25 mm/s, attendre 50 ms avant de couper aurait
+// represente 1,25 mm de surcourse.
 #define ENDSTOP_DEBOUNCE_MS 50
 
 // Nombre maximum de notes simultanees (protection alimentation 5V/10A)
@@ -69,9 +73,27 @@
 #define STEPPER_MAX_ACCEL 100
 
 // Frequence de pas maximale reellement tenable par le MCU avec FlexyStepper.
-// Sur AVR 16 MHz, au-dela de ~10 kHz la generation de pas decroche.
-// BellowController borne la vitesse a STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM.
+// FlexyStepper ne produit qu'UN pas par appel a processMovement() : la frequence reelle
+// est donc bornee par la periode de la boucle principale, pas seulement par le CPU.
+// D'ou l'ordonnancement retenu : un seul message MIDI par tour de boucle et plusieurs
+// appels de service au generateur de pas (STEPPER_SERVICE_CALLS).
+// Le test test_timing mesure la frequence reellement atteinte ; ajuster cette valeur en
+// fonction de la mesure sur la machine reelle.
 #define STEPPER_MAX_STEP_RATE_HZ 10000.0f
+
+// Nombre d'appels a processMovement() par tour de boucle. processMovement() est
+// auto-limite par micros() : les appels en trop sont quasi gratuits, mais ils permettent
+// de rattraper les pas perdus pendant une rafale MIDI ou une ecriture I2C (~110 us).
+#define STEPPER_SERVICE_CALLS 4
+
+// Deceleration utilisee pour l'arret d'urgence sur fin de course (mm/s^2).
+// Le driver etant deja coupe a ce moment-la, cette rampe ne produit aucun mouvement
+// physique : elle sert uniquement a ramener rapidement l'etat interne de FlexyStepper a
+// l'arret, seule condition ou setCurrentPosition() est legitime.
+#define STEPPER_EMERGENCY_DECEL 5000.0f
+
+// Duree max de la sequence d'arret avant declaration de defaut (ms)
+#define STEPPER_STOP_TIMEOUT_MS 1000UL
 
 // Temps avant de desactiver le moteur et fermer la valve du soufflet (en millisecondes)
 #define BELLOW_INACTIVITY_TIMEOUT 60000UL // 1 minute
@@ -97,12 +119,24 @@
 // Pas par millimetre reellement envoyes au driver.
 // Ex. 200 * 16 * 2 / 16 = 400 pas/mm.
 #define STEPS_PER_MM (((float)MOTOR_STEPS_PER_REV * (float)MICRO_STEP * GEAR_RATIO) / SCREW_LEAD_MM)
+
+// Compromis microstepping / vitesse : la vitesse maximale utile vaut
+// STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM, soit ~25 mm/s a 400 pas/mm. Si le soufflet
+// doit aller plus vite (beaucoup de notes simultanees), il faut REDUIRE MICRO_STEP
+// (1/8 -> 50 mm/s, 1/4 -> 100 mm/s) et non augmenter STEPPER_MAX_SPEED, qui est de toute
+// facon borne a l'execution par BellowController::begin().
 //-----------------------------------------------------------------------------------------
 
 // === CALIBRATION (HOMING) ===
-#define HOMING_SPEED 10.0f            // Vitesse de recherche du zero en mm/s
-#define HOMING_MAX_DISTANCE 250.0f    // Course max autorisee avant declaration de defaut (mm)
-#define HOMING_TIMEOUT_MS 45000UL     // Duree max du homing (doit couvrir HOMING_MAX_DISTANCE / HOMING_SPEED)
+// Homing en deux passes, comme sur une machine-outil : approche rapide, degagement, puis
+// reapproche lente. Le premier contact sert seulement a localiser grossierement la butee ;
+// la surcourse eventuelle (driver coupe en urgence) est donc sans effet sur le zero final,
+// qui est etabli par la seconde approche, lente.
+#define HOMING_SPEED 10.0f            // Approche rapide (mm/s)
+#define HOMING_SLOW_SPEED 1.5f        // Reapproche lente, fixe le zero (mm/s)
+#define HOMING_BACKOFF_MM 4.0f        // Degagement entre les deux approches (mm)
+#define HOMING_MAX_DISTANCE 250.0f    // Course max de l'approche rapide (mm)
+#define HOMING_TIMEOUT_MS 60000UL     // Duree max de TOUT le homing, deux passes comprises
 
 //===========================================================================================================
 // === Gestion des notes / servomoteurs
@@ -112,12 +146,21 @@
 
 // === REPONSE A LA VELOCITE ===
 // La velocite n'agit pas sur les servos (une valve est ouverte ou fermee) mais sur la
-// demande d'air : attaque breve plus franche, puis niveau tenu proportionnel.
-//   facteurTenu   = VELOCITY_SUSTAIN_MIN + (1 - VELOCITY_SUSTAIN_MIN) * velocity/127
-//   facteurAttaque = facteurTenu * (1 + VELOCITY_ATTACK_BOOST * velocity/127)
+// demande d'air. Elle est appliquee PAR NOTE : chaque note ouverte pondere son propre
+// debit. Une note jouee doucement au milieu d'un accord fort ne fait donc plus chuter le
+// debit de tout l'accord, et inversement.
+//   debit_total = somme( airFlowMultiplier_i * poidsTenu(velocity_i) )
+//   poidsTenu(v) = VELOCITY_SUSTAIN_MIN + (1 - VELOCITY_SUSTAIN_MIN) * v/127
+// L'attaque est un supplement temporaire applique a la SEULE derniere note declenchee :
+//   bonus = airFlow_derniere * poidsTenu(v) * VELOCITY_ATTACK_BOOST * v/127
 #define VELOCITY_SUSTAIN_MIN 0.60f  // Facteur de debit pour velocity = 1
 #define VELOCITY_ATTACK_BOOST 0.50f // Surcroit de debit pendant l'attaque (a velocity = 127)
 #define VELOCITY_ATTACK_MS 120UL    // Duree de la phase d'attaque
+
+// Poids du niveau tenu pour une velocite donnee.
+inline float velocitySustainWeight(uint8_t velocity) {
+    return VELOCITY_SUSTAIN_MIN + (1.0f - VELOCITY_SUSTAIN_MIN) * ((float)velocity / 127.0f);
+}
 
 // === CONFIGURATION DES SERVOMOTEURS ===
 // Frequence des servomoteurs (50Hz recommande pour la plupart des servos)
@@ -130,6 +173,9 @@
 // Espacement entre servos lors de la fermeture initiale, pour eviter un appel de courant
 // simultane des 59 servos au demarrage (en millisecondes).
 #define SERVO_INIT_STAGGER_MS 15
+// Nombre d'erreurs I2C consecutives tolerees avant passage en defaut.
+// Un PCA9685 qui cesse de repondre en cours de jeu laisse des anches ouvertes.
+#define SERVO_I2C_ERROR_LIMIT 8
 
 // Valeurs standard pour les positions des servos
 #define SERVO_MIN_ANGLE 0    // Angle minimum du servo
