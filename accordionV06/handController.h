@@ -4,9 +4,6 @@
 #include "settings.h"
 #include "servoController.h"
 
-// Nombre maximum de notes pour une main (main droite = 34)
-#define MAX_NOTES_PER_HAND 34
-
 // Comparaison d'anciennete resistante au rebouclage du compteur d'activation.
 // `a` est plus ancien que `b` si la difference signee est negative : cela reste vrai
 // apres le passage de 65535 a 0, contrairement a un simple `a < b`.
@@ -17,12 +14,21 @@ inline bool seqIsOlder(uint16_t a, uint16_t b) {
 // Classe generique pour controler les deux mains (gauche et droite).
 //
 // La velocite n'est volontairement pas traitee ici : une valve d'anche est ouverte ou
-// fermee, il n'y a pas de nuance possible cote servo. La dynamique est produite par le
-// debit d'air (voir BellowController).
+// fermee, il n'y a pas de nuance possible cote actionneur. La dynamique est produite par le
+// debit d'air (voir la source d'air).
+//
+// Le type d'actionneur (servo ou electroaimant) est choisi dans config.h et resolu a la
+// compilation : la classe expose la meme interface dans les deux cas.
 class HandController {
 public:
-    // Constructeur generique pour gerer une main avec un mapping specifique
+    // Constructeur generique pour gerer une main avec un mapping specifique.
+    // `numNotes` peut valoir 0 : la main est alors inexistante et tout devient inoperant,
+    // ce qui permet un instrument melodie seule ou basses seules sans code conditionnel.
     HandController(ServoController &servoCtrl, const NoteConfig *mapping, byte numNotes);
+
+    // Entretien periodique. Sans objet pour des servos ; pour des electroaimants, c'est ici
+    // que le courant d'appel retombe au courant de maintien.
+    void update();
 
     bool canPlay(byte note) const;      // La note existe-t-elle dans le mapping ?
     bool isNoteActive(byte note) const; // La note est-elle deja ouverte ?
@@ -53,9 +59,10 @@ public:
     float releaseSustained(byte &releasedCount);
 
     void allNotesOff();    // Desactive toutes les notes (MIDI Panic)
-    void closeAllServos(); // Ferme tous les servos (position initiale, echelonnee)
+    void closeAllServos(); // Ferme tous les actionneurs (position initiale, echelonnee)
 
     byte getActiveNoteCount() const { return activeCount; }
+    byte getNoteCount() const { return numNotes; }
 
     // === VOL DE VOIX ===
     // Cherche la note active la moins prioritaire, puis la plus ancienne, dont la priorite
@@ -65,8 +72,8 @@ public:
     float releaseIndex(byte index);
 
 private:
-    ServoController &servoController; // Reference au controleur de servos
-    const NoteConfig *mapping;        // Mapping des servos pour cette main
+    ServoController &servoController; // Reference au controleur d'actionneurs
+    const NoteConfig *mapping;        // Mapping des actionneurs pour cette main
     byte numNotes;                    // Nombre total de notes
     byte activeCount;                 // Nombre de notes actives
 
@@ -75,6 +82,18 @@ private:
     uint16_t noteSeq[MAX_NOTES_PER_HAND];    // Ordre d'activation (pour le vol de voix)
     byte noteVelocity[MAX_NOTES_PER_HAND];   // Velocite MIDI de chaque note ouverte
 
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    // Renfort d'appel : un electroaimant maintenu a pleine puissance chauffe. Une seule
+    // note est suivie a la fois, la derniere declenchee — comme le supplement de debit
+    // d'attaque. Suivre une echeance par note couterait 4 octets de SRAM par note, soit
+    // davantage que tout le reste de l'etat de la main.
+    int8_t pullInIndex;
+    uint32_t pullInSince;
+    void endPullIn(); // Ramene la note en cours d'appel au courant de maintien
+#endif
+
+    // Applique l'etat d'une valve, quel que soit le type d'actionneur configure.
+    void applyValve(const NoteConfig &config, bool open);
     void closeIndex(byte index); // Ferme la valve et remet les etats a zero
 };
 

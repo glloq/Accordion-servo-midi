@@ -3,8 +3,23 @@
 
 #include <Arduino.h>
 #include "settings.h"
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+
 #include <FlexyStepper.h>
 #include "servoController.h"
+#include "airValve.h"
+#include "airFault.h"
+#include "pressureRegulator.h"
+
+// =========================================================================================
+// SOURCE D'AIR : soufflet acoustique entraine par un moteur pas a pas.
+// -----------------------------------------------------------------------------------------
+// C'est la source la plus fidele a l'instrument d'origine : la pression est produite en
+// poussant ET en tirant, avec inversion du sens avant les fins de course. C'est aussi la
+// seule qui possede une course mesuree, donc une calibration.
+//
+// Elle implemente l'interface commune decrite dans airSource.h.
+// =========================================================================================
 
 // Etats du soufflet.
 //
@@ -22,21 +37,9 @@ enum BellowState {
     BELLOW_FAULT            // Defaut verrouille : moteur coupe, valve ouverte
 };
 
-// Codes de defaut
-enum BellowFault {
-    FAULT_NONE = 0,
-    FAULT_HOMING_TIMEOUT,   // Butee basse non atteinte dans le temps imparti
-    FAULT_HOMING_DISTANCE,  // Course maximale parcourue sans rencontrer la butee
-    FAULT_ENDSTOP_WIRING,   // Les deux fins de course actifs simultanement
-    FAULT_HOMING_DIRECTION, // Butee HAUTE atteinte alors qu'on descend (DIR inverse ?)
-    FAULT_ENDSTOP_STUCK,    // Contact toujours actif apres degagement
-    FAULT_STOP_TIMEOUT      // La sequence d'arret ne se termine pas
-};
-
 class BellowController {
 public:
-    // Constructeur prenant un ServoController en parametre
-    BellowController(ServoController &servoCtrl);
+    BellowController(ServoController &servoCtrl, AirValve &valve, PressureRegulator &regulator);
 
     void begin();  // Initialise le moteur pas a pas et lance le homing
     void update(); // Securite fins de course, machine a etats, service du generateur de pas
@@ -47,43 +50,48 @@ public:
     void setVolume(byte volumeValue);         // CC7  (volume principal)
     void setExpression(byte expressionValue); // CC11 (expression)
 
-    void startHoming();     // (Re)lance la calibration, non bloquante
-    void stopAndDisable();  // Arret + coupure du driver (mise au repos)
+    void startCalibration(); // (Re)lance la calibration, non bloquante
+    void startHoming() { startCalibration(); } // Ancien nom
+    void stopAndDisable();   // Arret + coupure du driver (mise au repos)
 
-    void openValve();  // Ouvre la valve d'air
+    void openValve();  // Ouvre la valve d'air (mise a l'air libre)
     void closeValve(); // Ferme la valve d'air
 
-    bool isHoming() const;
+    bool isCalibrating() const;
+    bool isHoming() const { return isCalibrating(); } // Ancien nom
     bool isReady() const { return state == BELLOW_READY; }
     bool hasFault() const { return state == BELLOW_FAULT; }
-    BellowFault getFault() const { return fault; }
-    void setFault(BellowFault code); // Passage en defaut (aussi utilise par Instrument)
-    void clearFault();               // Acquitte un defaut et relance un homing
+    AirFault getFault() const { return fault; }
+    void setFault(AirFault code); // Passage en defaut (aussi utilise par Instrument)
+    void clearFault();            // Acquitte un defaut et relance une calibration
 
     // Diagnostic / tests
     BellowState getState() const { return state; }
-    float getPositionInMillimeters() { return stepper.getCurrentPositionInMillimeters(); }
+    // Position dans le repere de la MACHINE (0 = ferme), signe de DIR compris.
+    float getPositionInMillimeters() {
+        return stepper.getCurrentPositionInMillimeters() * STEPPER_DIR_SIGN;
+    }
     float getMaxSpeed() const { return maxSpeed; }
 
 private:
-    ServoController &servoController; // Reference vers le controleur des servos
-    FlexyStepper stepper;             // Moteur pas a pas pour controler le soufflet
+    AirValve &airValve;                // Valve generale de mise a l'air libre
+    PressureRegulator &pressure;       // Correction en boucle fermee (neutre sans capteur)
+    FlexyStepper stepper;              // Moteur pas a pas entrainant le soufflet
 
     BellowState state;
     BellowState stateBeforeStop; // Etat a reprendre apres une sequence d'arret
-    BellowFault fault;
+    AirFault fault;
 
-    bool valveOpen;       // Indique si la valve est ouverte
     bool movingDirection; // true = ouverture, false = fermeture
     bool motorRunning;    // Une consigne de pression est active
-    bool motorEnabled;    // Etat de la broche ENABLE du driver (actif bas)
+    bool motorEnabled;    // Etat de la broche ENABLE du driver
 
     float airDemand;      // Derniere demande d'air connue
     byte volume;          // CC7  (0-127)
     byte expression;      // CC11 (0-127)
     float maxSpeed;       // Vitesse max reellement tenable (bornee par le debit de pas)
 
-    uint32_t homingStartTime; // Debut du homing complet (toutes passes confondues)
+    uint32_t homingStartTime; // Debut de la calibration complete (toutes passes confondues)
     uint32_t stopStartTime;   // Debut de la sequence d'arret courante
 
     // Debounce des fins de course
@@ -92,6 +100,7 @@ private:
     bool rawEndstopMin, rawEndstopMax;       // Dernier niveau lu
     bool stableEndstopMin, stableEndstopMax; // Niveau stabilise (true = actif)
 
+    static bool readEndstop(uint8_t pin);   // Lecture brute, niveau actif configure
     void updateEndstops();  // Debounce des deux fins de course
     // true si le mouvement en cours pousse VERS le contact indique. Un contact atteint
     // alors qu'on s'en eloigne n'est pas une urgence (cas du degagement de homing, ou du
@@ -115,8 +124,9 @@ private:
     void stopPressure();    // Stoppe le mouvement sans couper le driver
     void retarget();        // Envoie la cible correspondant a movingDirection
     void serviceStepper();  // Appels de service au generateur de pas
-    void enableMotor();     // Active le driver (ENABLE bas)
-    void disableMotor();    // Coupe le driver (ENABLE haut)
+    void enableMotor();     // Active le driver
+    void disableMotor();    // Coupe le driver
 };
 
+#endif // AIR_SOURCE_BELLOW_STEPPER
 #endif

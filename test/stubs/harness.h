@@ -11,6 +11,11 @@ extern unsigned long stubMicros;
 
 // Etat des broches ecrites par le firmware (index = numero de broche).
 extern int stubPinState[32];
+// Derniere valeur ecrite par analogWrite(), par broche. -1 = jamais ecrite.
+extern int stubAnalogOut[32];
+// Valeur rendue par analogRead(), par broche. C'est par la que les tests injectent une
+// pression mesuree.
+extern int stubAnalogIn[32];
 
 // Machine simulee
 extern FlexyStepper *g_stepper;

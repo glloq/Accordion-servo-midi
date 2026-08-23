@@ -3,13 +3,15 @@
 // L'ordre de la liste d'initialisation suit l'ordre de declaration des membres.
 Instrument::Instrument()
     : servoController(),
-      bellowController(servoController),
+      airValve(servoController),
+      pressureRegulator(),
+      airSource(servoController, airValve, pressureRegulator),
       leftHand(servoController, LEFT_HAND_MAPPING, NUM_NOTES_LEFT),
       rightHand(servoController, RIGHT_HAND_MAPPING, NUM_NOTES_RIGHT),
       state(SYS_BOOT), instrumentFault(INST_FAULT_NONE),
       noteSequence(0),
       attackHand(NULL), attackIndex(0), lastAttackTime(0), attackActive(false),
-      sustainActive(false), bellowIdle(false), lastActivityTime(0) {}
+      sustainActive(false), airIdle(false), lastActivityTime(0) {}
 
 byte Instrument::getActiveNoteCount() const {
     // Derive des deux mains plutot que maintenu a la main : aucun risque de desynchronisation
@@ -22,12 +24,20 @@ void Instrument::begin() {
     state = SYS_SERVO_INIT;
 
     // Un PCA9685 absent signifie des anches muettes, voire une valve generale inoperante
-    // alors que le soufflet, lui, fonctionnerait : on ne demarre pas.
+    // alors que la source d'air, elle, fonctionnerait : on ne demarre pas.
     if (!servoController.begin()) {
-        // Le soufflet n'est pas encore initialise : on met le driver hors tension
-        // directement, sans passer par BellowController.
+        // La source d'air n'est pas encore initialisee : on met sa puissance hors tension
+        // directement, sans passer par elle.
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
         pinMode(STEPPER_EN_PIN, OUTPUT);
-        digitalWrite(STEPPER_EN_PIN, HIGH);
+        digitalWrite(STEPPER_EN_PIN, STEPPER_EN_OFF);
+#elif AIR_SOURCE == AIR_SOURCE_BLOWER_PWM
+        pinMode(BLOWER_PWM_PIN, OUTPUT);
+        analogWrite(BLOWER_PWM_PIN, BLOWER_PWM_INVERT ? 255 : 0);
+#elif AIR_SOURCE == AIR_SOURCE_PUMP_ONOFF
+        pinMode(PUMP_PIN, OUTPUT);
+        digitalWrite(PUMP_PIN, PUMP_ACTIVE_LEVEL ? LOW : HIGH);
+#endif
         enterFault(INST_FAULT_PCA_MISSING);
         #if DEBUG
         Serial.print(F("[DEBUG] PCA manquants, masque: "));
@@ -36,30 +46,49 @@ void Instrument::begin() {
         return;
     }
 
-    // Ferme tous les servos au demarrage (position initiale sure), de maniere echelonnee
-    // pour ne pas solliciter les 59 servos en meme temps.
+    // Ferme tous les actionneurs au demarrage (position initiale sure), de maniere
+    // echelonnee pour ne pas les solliciter tous en meme temps.
     leftHand.closeAllServos();
     rightHand.closeAllServos();
 
+    airValve.begin(); // Mise a l'air libre tant que rien n'est demande
+
     #if DEBUG
-    Serial.println(F("[DEBUG] Instrument: servos initialises"));
+    Serial.println(F("[DEBUG] Instrument: actionneurs initialises"));
     #endif
 
     state = SYS_HOMING;
-    bellowController.begin();  // Initialise le moteur pas a pas et lance le homing
+    airSource.begin(); // Calibration / armement, non bloquant
 
     lastActivityTime = millis();
 
     #if DEBUG
-    Serial.println(F("[DEBUG] Instrument: homing en cours"));
+    Serial.println(F("[DEBUG] Instrument: mise en route de la source d'air"));
     #endif
 }
 
-// === SELECTION DE LA MAIN ===
-HandController *Instrument::handForChannel(byte channel) {
+// === ATTRIBUTION D'UNE NOTE A UNE MAIN ===
+// Le mode de routage est fixe par MIDI_ROUTING (config.h) et resolu a la compilation.
+HandController *Instrument::handForNote(byte note, byte channel) {
+#if MIDI_ROUTING == MIDI_ROUTING_CHANNEL
+    (void)note;
     if (channel == MIDI_CHANNEL_LEFT) return &leftHand;
     if (channel == MIDI_CHANNEL_RIGHT) return &rightHand;
     return NULL;
+
+#elif MIDI_ROUTING == MIDI_ROUTING_SPLIT
+    // Point de partage sur le numero de note : permet de jouer un fichier MIDI mono-canal.
+    (void)channel;
+    return (note < MIDI_SPLIT_NOTE) ? &leftHand : &rightHand;
+
+#else // MIDI_ROUTING_MERGE
+    // Tous canaux confondus, la main droite est essayee en premier. Le resultat ne depend
+    // que du mapping, donc NoteOn et NoteOff choisissent toujours la meme main.
+    (void)channel;
+    if (rightHand.canPlay(note)) return &rightHand;
+    if (leftHand.canPlay(note)) return &leftHand;
+    return NULL;
+#endif
 }
 
 // === ATTAQUE ===
@@ -83,7 +112,7 @@ void Instrument::clearAttack() {
 // === DEMANDE D'AIR ===
 void Instrument::refreshAirDemand() {
     float demand = leftHand.weightedAirFlow() + rightHand.weightedAirFlow() + attackBonus();
-    bellowController.setAirDemand(demand);
+    airSource.setAirDemand(demand);
 }
 
 // === VOL DE VOIX ===
@@ -130,7 +159,7 @@ bool Instrument::stealVoice(byte incomingPriority) {
 
 // === ACTIVATION D'UNE NOTE ===
 void Instrument::noteOn(byte note, byte velocity, byte channel) {
-    // Aucune note tant que l'instrument n'est pas pret (init servos, homing, defaut).
+    // Aucune note tant que l'instrument n'est pas pret (init actionneurs, calibration, defaut).
     if (state != SYS_READY) {
         #if DEBUG
         Serial.println(F("[DEBUG] NoteOn refusee: instrument non pret"));
@@ -138,10 +167,10 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
         return;
     }
 
-    HandController *hand = handForChannel(channel);
+    HandController *hand = handForNote(note, channel);
     if (hand == NULL) {
         #if DEBUG
-        Serial.print(F("[DEBUG] Canal MIDI ignore: "));
+        Serial.print(F("[DEBUG] Note non routee, canal: "));
         Serial.println(channel);
         #endif
         return;
@@ -167,9 +196,9 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
     hand->noteOn(note, velocity, ++noteSequence);
 
     // Ferme la valve si c'est la premiere note (creation de la pression)
-    if (firstNote) bellowController.closeValve();
+    if (firstNote) airValve.close();
 
-    bellowIdle = false;
+    airIdle = false;
     attackHand = hand;
     attackIndex = (byte)index;
     lastAttackTime = millis();
@@ -189,7 +218,7 @@ void Instrument::noteOn(byte note, byte velocity, byte channel) {
 
 // === DESACTIVATION D'UNE NOTE ===
 void Instrument::noteOff(byte note, byte channel) {
-    HandController *hand = handForChannel(channel);
+    HandController *hand = handForNote(note, channel);
     if (hand == NULL) return;
 
     // Sustain actif : la note reste ouverte mais est marquee comme relachee au clavier.
@@ -250,8 +279,8 @@ void Instrument::allNotesOff() {
     lastActivityTime = millis();
 
     refreshAirDemand();
-    bellowController.openValve();
-    bellowIdle = false;
+    airValve.open();
+    airIdle = false;
 
     #if DEBUG
     Serial.println(F("[DEBUG] All Notes Off - MIDI Panic"));
@@ -271,10 +300,10 @@ void Instrument::enterFault(InstrumentFault reason) {
     instrumentFault = reason;
     state = SYS_FAULT;
 
-    // Le soufflet doit aussi se mettre en securite si le defaut vient d'ailleurs.
-    if (!bellowController.hasFault() && reason != INST_FAULT_BELLOW) {
-        bellowController.stopAndDisable();
-        bellowController.openValve();
+    // La source d'air doit aussi se mettre en securite si le defaut vient d'ailleurs.
+    if (!airSource.hasFault() && reason != INST_FAULT_BELLOW) {
+        airSource.stopAndDisable();
+        airValve.open();
     }
 
     #if DEBUG
@@ -285,15 +314,17 @@ void Instrument::enterFault(InstrumentFault reason) {
 
 // === MET A JOUR L'INSTRUMENT ===
 void Instrument::update() {
-    bellowController.update();
+    airSource.update();
+    leftHand.update();  // Sans objet pour des servos ; retombee du courant d'appel des
+    rightHand.update(); // electroaimants sinon.
 
     // Transitions d'etat
-    if (bellowController.hasFault()) {
+    if (airSource.hasFault()) {
         enterFault(INST_FAULT_BELLOW);
     } else if (servoController.hasBusFailure()) {
         // Un PCA qui cesse de repondre en cours de jeu laisserait des anches ouvertes.
         enterFault(INST_FAULT_PCA_BUS);
-    } else if (state == SYS_HOMING && bellowController.isReady()) {
+    } else if (state == SYS_HOMING && airSource.isReady()) {
         state = SYS_READY;
         lastActivityTime = millis();
         #if DEBUG
@@ -312,15 +343,16 @@ void Instrument::update() {
     if (getActiveNoteCount() > 0) lastActivityTime = millis();
 
     managePCA();        // Gere la coupure de l'OE des PCA
-    manageInactivity(); // Gere l'inactivite du soufflet
+    manageInactivity(); // Gere la mise au repos de la source d'air
 }
 
 // === GESTION DE LA DESACTIVATION DES PCA ===
-// L'OE est partage par les 4 PCA9685, valve generale comprise. On ne le coupe donc que :
-//  - a l'etat READY uniquement (pendant le homing la valve doit rester ouverte, et en
+// Avec un OE partage, la valve generale est coupee en meme temps que les anches. On ne le
+// coupe donc que :
+//  - a l'etat READY uniquement (pendant la calibration la valve doit rester ouverte, et en
 //    defaut elle doit rester ouverte pour liberer la pression),
-//  - et PCA_DISABLE_DELAY apres la DERNIERE commande servo, pour laisser a la valve le
-//    temps d'atteindre sa position.
+//  - et PCA_DISABLE_DELAY apres la DERNIERE commande, pour laisser aux servos le temps
+//    d'atteindre leur position.
 void Instrument::managePCA() {
     if (state != SYS_READY) return;
     if (getActiveNoteCount() != 0) return;
@@ -330,27 +362,27 @@ void Instrument::managePCA() {
     }
 }
 
-// === GESTION DE L'INACTIVITE DU SOUFFLET ===
+// === GESTION DE L'INACTIVITE DE LA SOURCE D'AIR ===
 void Instrument::manageInactivity() {
-    // Jamais pendant le homing : la calibration peut durer plusieurs dizaines de secondes
-    // et couper le driver a ce moment-la bloquait definitivement le soufflet.
+    // Jamais pendant la calibration : elle peut durer plusieurs dizaines de secondes et
+    // couper la puissance a ce moment-la bloquait definitivement le soufflet.
     if (state != SYS_READY) return;
-    if (getActiveNoteCount() != 0 || bellowIdle) return;
+    if (getActiveNoteCount() != 0 || airIdle) return;
 
-    if ((millis() - lastActivityTime) > BELLOW_INACTIVITY_TIMEOUT) {
-        bellowController.openValve();
-        bellowController.stopAndDisable();
-        bellowIdle = true; // Latch : evite de recommander la valve a chaque tour de boucle
+    if ((millis() - lastActivityTime) > AIR_INACTIVITY_TIMEOUT) {
+        airValve.open();
+        airSource.stopAndDisable();
+        airIdle = true; // Latch : evite de recommander la valve a chaque tour de boucle
 
         #if DEBUG
-        Serial.println(F("[DEBUG] Inactivite - moteur desactive"));
+        Serial.println(F("[DEBUG] Inactivite - source d'air arretee"));
         #endif
     }
 }
 
 // === GESTION DU VOLUME MIDI ===
 void Instrument::setVolume(byte volume) {
-    bellowController.setVolume(volume);
+    airSource.setVolume(volume);
 
     #if DEBUG
     Serial.print(F("[DEBUG] Volume: "));
@@ -359,5 +391,5 @@ void Instrument::setVolume(byte volume) {
 }
 
 void Instrument::setExpression(byte expression) {
-    bellowController.setExpression(expression);
+    airSource.setExpression(expression);
 }

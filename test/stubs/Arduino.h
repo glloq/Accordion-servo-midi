@@ -9,6 +9,12 @@ typedef uint8_t byte;
 #define LOW 0
 #define OUTPUT 1
 #define INPUT_PULLUP 2
+#define INPUT 0
+// Broches analogiques : numerotees a la suite des broches numeriques, comme sur AVR.
+#define A0 14
+#define A1 15
+#define A2 16
+#define A3 17
 #ifndef NULL
 #define NULL 0
 #endif
@@ -20,6 +26,8 @@ void delay(unsigned long);
 void pinMode(uint8_t, uint8_t);
 void digitalWrite(uint8_t, uint8_t);
 int digitalRead(uint8_t);
+void analogWrite(uint8_t, int);
+int analogRead(uint8_t);
 long map(long x, long a, long b, long c, long d);
 struct SerialStub {
   void begin(unsigned long) {}

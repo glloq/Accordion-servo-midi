@@ -2,7 +2,11 @@
 
 // === CONSTRUCTEUR ===
 HandController::HandController(ServoController &servoCtrl, const NoteConfig *mapping, byte numNotes)
-    : servoController(servoCtrl), mapping(mapping), numNotes(numNotes), activeCount(0) {
+    : servoController(servoCtrl), mapping(mapping), numNotes(numNotes), activeCount(0)
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    , pullInIndex(-1), pullInSince(0)
+#endif
+{
     // Initialise tous les etats a inactif
     for (byte i = 0; i < MAX_NOTES_PER_HAND; i++) {
         noteStates[i] = false;
@@ -11,6 +15,41 @@ HandController::HandController(ServoController &servoCtrl, const NoteConfig *map
         noteVelocity[i] = 0;
     }
 }
+
+// === COMMANDE D'UNE VALVE ===
+// Seul endroit du firmware qui connait le type d'actionneur. Tout le reste raisonne en
+// "ouvert / ferme".
+void HandController::applyValve(const NoteConfig &config, bool open) {
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    // Pleine puissance a l'ouverture : le courant retombe au maintien dans update().
+    servoController.setRawDuty(config.pcaAddress, config.channel, open ? 4095 : 0);
+#else
+    servoController.setServoAngle(config.pcaAddress, config.channel,
+                                  open ? openAngleFor(config) : config.closedPosition);
+#endif
+}
+
+// === ENTRETIEN PERIODIQUE ===
+void HandController::update() {
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    if (pullInIndex < 0) return;
+    if ((millis() - pullInSince) < (uint32_t)SOLENOID_PULLIN_MS) return;
+    endPullIn();
+#endif
+}
+
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+void HandController::endPullIn() {
+    if (pullInIndex < 0) return;
+    byte index = (byte)pullInIndex;
+    pullInIndex = -1;
+    if (index >= numNotes || !noteStates[index]) return; // Deja refermee entre-temps
+
+    NoteConfig config;
+    loadNoteConfig(mapping, index, config);
+    servoController.setRawDuty(config.pcaAddress, config.channel, SOLENOID_HOLD_COUNTS);
+}
+#endif
 
 // === VERIFICATION DE LA NOTE ===
 bool HandController::canPlay(byte note) const {
@@ -49,7 +88,15 @@ float HandController::noteOn(byte note, byte velocity, uint16_t seq) {
 
     NoteConfig config;
     loadNoteConfig(mapping, (uint8_t)index, config);
-    servoController.setServoAngle(config.pcaAddress, config.channel, openAngleFor(config));
+    applyValve(config, true);
+
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    // La note precedemment en appel passe immediatement au maintien : deux electroaimants a
+    // pleine puissance en meme temps doublent l'appel de courant.
+    endPullIn();
+    pullInIndex = index;
+    pullInSince = millis();
+#endif
 
     noteStates[index] = true;
     sustainedNotes[index] = false;
@@ -84,7 +131,10 @@ byte HandController::velocityOfIndex(byte index) const {
 void HandController::closeIndex(byte index) {
     NoteConfig config;
     loadNoteConfig(mapping, index, config);
-    servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
+    applyValve(config, false);
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    if (pullInIndex == (int8_t)index) pullInIndex = -1;
+#endif
     noteStates[index] = false;
     sustainedNotes[index] = false;
     if (activeCount > 0) activeCount--;
@@ -164,25 +214,31 @@ void HandController::allNotesOff() {
         if (noteStates[i]) {
             NoteConfig config;
             loadNoteConfig(mapping, i, config);
-            servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
+            applyValve(config, false);
         }
         noteStates[i] = false;
         sustainedNotes[i] = false;
     }
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    pullInIndex = -1;
+#endif
     activeCount = 0;
 }
 
-// === FERME TOUS LES SERVOS (POSITION INITIALE) ===
+// === FERME TOUS LES ACTIONNEURS (POSITION INITIALE) ===
 // Echelonne les commandes : refermer des dizaines de servos au meme instant provoque un
-// appel de courant que l'alimentation 5V/10A ne peut pas encaisser.
+// appel de courant que l'alimentation ne peut pas encaisser.
 void HandController::closeAllServos() {
     for (byte i = 0; i < numNotes; i++) {
         NoteConfig config;
         loadNoteConfig(mapping, i, config);
-        servoController.setServoAngle(config.pcaAddress, config.channel, config.closedPosition);
+        applyValve(config, false);
         noteStates[i] = false;
         sustainedNotes[i] = false;
         delay(SERVO_INIT_STAGGER_MS);
     }
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+    pullInIndex = -1;
+#endif
     activeCount = 0;
 }

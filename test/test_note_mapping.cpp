@@ -3,6 +3,16 @@
 #include "noteMapping.h"
 #include "test_assert.h"
 
+// Le meme fichier est rejoue pour plusieurs sources d'air : chacune reserve des canaux PCA
+// differents. Le nom de suite le rappelle dans la sortie.
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+  #define SUITE_NAME "test_note_mapping (soufflet a servo)"
+#elif AIR_SOURCE == AIR_SOURCE_BLOWER_ESC
+  #define SUITE_NAME "test_note_mapping (turbine ESC)"
+#else
+  #define SUITE_NAME "test_note_mapping"
+#endif
+
 int main() {
     printf("\n=== Main gauche : disposition du README ===\n");
     {
@@ -88,11 +98,27 @@ int main() {
         }
         check("aucun canal PCA partage entre deux notes", channelsUnique);
 
+        // Tout organe pose sur un PCA occupe un canal au meme titre qu'une anche. Les
+        // reserver n'a rien de theorique : les valeurs par defaut de la valve, du servo de
+        // soufflet et de l'ESC tombaient sur des canaux deja pris par des notes.
+#if AIR_VALVE_TYPE == AIR_VALVE_SERVO
         int valvePca = -1;
         for (int p = 0; p < NUM_PCA_TOTAL; p++)
             if (PCA_TAB[p] == VALVE_PCA_ADDRESS) valvePca = p;
         check("canal de la valve generale libre",
               valvePca >= 0 && !used[valvePca][VALVE_PCA_PIN]);
+#endif
+
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+        check("canal du servo de soufflet libre",
+              BELLOW_SERVO_PCA_INDEX < NUM_PCA_TOTAL &&
+              !used[BELLOW_SERVO_PCA_INDEX][BELLOW_SERVO_PCA_PIN]);
+#endif
+
+#if AIR_SOURCE == AIR_SOURCE_BLOWER_ESC
+        check("canal de l'ESC libre",
+              ESC_PCA_INDEX < NUM_PCA_TOTAL && !used[ESC_PCA_INDEX][ESC_PCA_PIN]);
+#endif
 
         // Les angles d'ouverture doivent rester dans la plage servo utile.
         bool anglesOk = true;
@@ -113,5 +139,5 @@ int main() {
               openAngleFor(normal) == openAngleFor(mirror));
     }
 
-    return testSummary("test_note_mapping");
+    return testSummary(SUITE_NAME);
 }

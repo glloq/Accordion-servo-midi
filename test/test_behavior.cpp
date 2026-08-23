@@ -143,7 +143,7 @@ int main() {
         bringUp(inst);
         check("instrument pret", inst.isReady());
 
-        runLoop(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 500);
+        runLoop(inst, AIR_INACTIVITY_TIMEOUT + 3000, 500);
         check("driver coupe apres inactivite", stubPinState[STEPPER_EN_PIN] == HIGH);
         check("OE des PCA coupe apres inactivite", stubPinState[PCA_OE_PIN] == HIGH);
 
@@ -193,7 +193,7 @@ int main() {
         runLoop(inst, 100);
         check("note fermee au relachement de la pedale", inst.getActiveNoteCount() == 0);
 
-        runLoop(inst, BELLOW_INACTIVITY_TIMEOUT + 3000, 500);
+        runLoop(inst, AIR_INACTIVITY_TIMEOUT + 3000, 500);
         check("l'inactivite se declenche ensuite", stubPinState[STEPPER_EN_PIN] == HIGH);
     }
 

@@ -1,23 +1,53 @@
 #include "bellowController.h"
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+
 #include <math.h>
 
 // === CONSTRUCTEUR ===
-BellowController::BellowController(ServoController &servoCtrl)
-    : servoController(servoCtrl), state(BELLOW_INIT), stateBeforeStop(BELLOW_INIT),
-      fault(FAULT_NONE),
-      valveOpen(false), movingDirection(true), motorRunning(false), motorEnabled(false),
+BellowController::BellowController(ServoController &servoCtrl, AirValve &valve,
+                                   PressureRegulator &regulator)
+    : airValve(valve), pressure(regulator),
+      state(BELLOW_INIT), stateBeforeStop(BELLOW_INIT), fault(FAULT_NONE),
+      movingDirection(true), motorRunning(false), motorEnabled(false),
       airDemand(0.0f), volume(100), expression(127),
       maxSpeed(STEPPER_MAX_SPEED), homingStartTime(0), stopStartTime(0),
       lastEndstopMinTime(0), lastEndstopMaxTime(0),
       rawEndstopMin(false), rawEndstopMax(false),
-      stableEndstopMin(false), stableEndstopMax(false) {}
+      stableEndstopMin(false), stableEndstopMax(false) {
+    (void)servoCtrl; // Le soufflet pas a pas ne pilote aucun canal PCA en direct
+}
 
-bool BellowController::isHoming() const {
+// =========================================================================================
+// REPERE
+// -----------------------------------------------------------------------------------------
+// Le firmware raisonne toujours dans le repere de la MACHINE : 0 = soufflet ferme, valeurs
+// croissantes = ouverture. Un cablage DIR inverse est absorbe par STEPPER_DIR_SIGN, applique
+// uniquement a la frontiere de FlexyStepper. Avec le signe par defaut (+1), le compilateur
+// elimine entierement ces conversions.
+// =========================================================================================
+static inline float toLib(float machineMm) { return machineMm * STEPPER_DIR_SIGN; }
+
+static float bellowMachinePosition(FlexyStepper &s) {
+    return s.getCurrentPositionInMillimeters() * STEPPER_DIR_SIGN;
+}
+
+bool BellowController::isCalibrating() const {
     return state == BELLOW_HOMING_FAST || state == BELLOW_HOMING_BACKOFF ||
            state == BELLOW_HOMING_SLOW ||
            (state == BELLOW_STOPPING &&
             (stateBeforeStop == BELLOW_HOMING_FAST || stateBeforeStop == BELLOW_HOMING_BACKOFF ||
              stateBeforeStop == BELLOW_HOMING_SLOW));
+}
+
+// === LECTURE BRUTE D'UN FIN DE COURSE ===
+// Le niveau actif est configurable : capteur optique NPN (actif bas) ou contact mecanique
+// cable en pull-up, mais aussi capteurs PNP a sortie active haute.
+bool BellowController::readEndstop(uint8_t pin) {
+#if LIMIT_SWITCH_ACTIVE_LOW
+    return digitalRead(pin) == LOW;
+#else
+    return digitalRead(pin) == HIGH;
+#endif
 }
 
 // === INITIALISATION ===
@@ -29,26 +59,33 @@ void BellowController::begin() {
     // FlexyStepper ne produit qu'un pas par appel a processMovement() : demander
     // STEPPER_MAX_SPEED * STEPS_PER_MM pas/s sans verifier menerait a un decrochage
     // silencieux du moteur.
-    maxSpeed = STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM;
+    maxSpeed = STEPPER_RATE_LIMITED_SPEED;
     if (maxSpeed > (float)STEPPER_MAX_SPEED) maxSpeed = (float)STEPPER_MAX_SPEED;
     if (maxSpeed < (float)STEPPER_MIN_SPEED) maxSpeed = (float)STEPPER_MIN_SPEED;
 
     stepper.setSpeedInMillimetersPerSecond(HOMING_SPEED);
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
 
+#if LIMIT_SWITCH_ACTIVE_LOW
     pinMode(LIMIT_SWITCH_MIN_PIN, INPUT_PULLUP);
     pinMode(LIMIT_SWITCH_MAX_PIN, INPUT_PULLUP);
+#else
+    pinMode(LIMIT_SWITCH_MIN_PIN, INPUT);
+    pinMode(LIMIT_SWITCH_MAX_PIN, INPUT);
+#endif
     pinMode(STEPPER_EN_PIN, OUTPUT);
-    digitalWrite(STEPPER_EN_PIN, HIGH); // Driver coupe tant que begin() n'a pas fini
+    digitalWrite(STEPPER_EN_PIN, STEPPER_EN_OFF); // Driver coupe tant que begin() n'a pas fini
     motorEnabled = false;
+
+    pressure.begin();
 
     // Amorce le debounce avec l'etat reel des contacts : un fin de course deja enfonce
     // au demarrage est ainsi detecte immediatement, sans attendre une transition.
-    rawEndstopMin = stableEndstopMin = (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW);
-    rawEndstopMax = stableEndstopMax = (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW);
+    rawEndstopMin = stableEndstopMin = readEndstop(LIMIT_SWITCH_MIN_PIN);
+    rawEndstopMax = stableEndstopMax = readEndstop(LIMIT_SWITCH_MAX_PIN);
     lastEndstopMinTime = lastEndstopMaxTime = millis();
 
-    startHoming();
+    startCalibration();
 }
 
 // === BOUCLE PRINCIPALE ===
@@ -59,8 +96,8 @@ void BellowController::update() {
     //    l'etat interne de FlexyStepper. Le debounce ne sert qu'a interpreter ensuite.
     // -------------------------------------------------------------------------------
     if (state != BELLOW_STOPPING && state != BELLOW_FAULT && state != BELLOW_INIT) {
-        bool rawMin = (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW);
-        bool rawMax = (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW);
+        bool rawMin = readEndstop(LIMIT_SWITCH_MIN_PIN);
+        bool rawMax = readEndstop(LIMIT_SWITCH_MAX_PIN);
 
         if ((rawMin && drivingInto(true)) || (rawMax && drivingInto(false))) {
             beginEmergencyStop();
@@ -76,7 +113,15 @@ void BellowController::update() {
         return;
     }
 
-    // 3. Machine a etats
+    // 3. Pression : surveillance et correction. Sans capteur, tout ceci disparait a la
+    //    compilation.
+    pressure.update();
+    if (state != BELLOW_FAULT && pressure.overPressure()) {
+        setFault(FAULT_OVERPRESSURE);
+        return;
+    }
+
+    // 4. Machine a etats
     switch (state) {
         case BELLOW_HOMING_FAST:
         case BELLOW_HOMING_SLOW:
@@ -95,13 +140,18 @@ void BellowController::update() {
             // L'inversion 30/70% est evaluee en continu : une note tenue ne genere aucun
             // evenement MIDI et doit malgre tout faire osciller le soufflet.
             updateDirection();
+#if PRESSURE_CLOSED_LOOP
+            // En boucle fermee, la vitesse depend de la mesure : la reappliquer a chaque
+            // tour de boucle est le seul moyen de suivre la correction.
+            if (motorRunning) applyDemand();
+#endif
             break;
 
         default:
             break;
     }
 
-    // 4. Generateur de pas
+    // 5. Generateur de pas
     if (state != BELLOW_FAULT) {
         serviceStepper();
     }
@@ -120,13 +170,13 @@ void BellowController::serviceStepper() {
 // === ACTIVATION / COUPURE DU DRIVER ===
 void BellowController::enableMotor() {
     if (motorEnabled) return;
-    digitalWrite(STEPPER_EN_PIN, LOW); // ENABLE actif bas
+    digitalWrite(STEPPER_EN_PIN, STEPPER_EN_ON);
     motorEnabled = true;
 }
 
 void BellowController::disableMotor() {
     if (!motorEnabled) return;
-    digitalWrite(STEPPER_EN_PIN, HIGH);
+    digitalWrite(STEPPER_EN_PIN, STEPPER_EN_OFF);
     motorEnabled = false;
 }
 
@@ -134,7 +184,7 @@ void BellowController::disableMotor() {
 void BellowController::updateEndstops() {
     uint32_t now = millis();
 
-    bool minLevel = (digitalRead(LIMIT_SWITCH_MIN_PIN) == LOW);
+    bool minLevel = readEndstop(LIMIT_SWITCH_MIN_PIN);
     if (minLevel != rawEndstopMin) {
         rawEndstopMin = minLevel;
         lastEndstopMinTime = now;
@@ -142,7 +192,7 @@ void BellowController::updateEndstops() {
         stableEndstopMin = minLevel;
     }
 
-    bool maxLevel = (digitalRead(LIMIT_SWITCH_MAX_PIN) == LOW);
+    bool maxLevel = readEndstop(LIMIT_SWITCH_MAX_PIN);
     if (maxLevel != rawEndstopMax) {
         rawEndstopMax = maxLevel;
         lastEndstopMaxTime = now;
@@ -237,8 +287,8 @@ void BellowController::onEndstopConfirmed(bool isMin) {
             setFault(FAULT_HOMING_DIRECTION);
             return;
         }
-        stepper.setCurrentPositionInMillimeters(BELLOW_MAX_POSITION);
-        stepper.setTargetPositionInMillimeters(BELLOW_MAX_POSITION);
+        stepper.setCurrentPositionInMillimeters(toLib(BELLOW_MAX_POSITION));
+        stepper.setTargetPositionInMillimeters(toLib(BELLOW_MAX_POSITION));
         movingDirection = false; // On repart en fermeture
         resumeAfterStop();
         return;
@@ -253,16 +303,16 @@ void BellowController::onEndstopConfirmed(bool isMin) {
     }
 
     if (stateBeforeStop == BELLOW_HOMING_SLOW) {
-        stepper.setCurrentPositionInMillimeters(BELLOW_MIN_POSITION);
-        stepper.setTargetPositionInMillimeters(BELLOW_MIN_POSITION);
+        stepper.setCurrentPositionInMillimeters(toLib(BELLOW_MIN_POSITION));
+        stepper.setTargetPositionInMillimeters(toLib(BELLOW_MIN_POSITION));
         movingDirection = true;
         finishHoming();
         return;
     }
 
     // En jeu : recalage et inversion.
-    stepper.setCurrentPositionInMillimeters(BELLOW_MIN_POSITION);
-    stepper.setTargetPositionInMillimeters(BELLOW_MIN_POSITION);
+    stepper.setCurrentPositionInMillimeters(toLib(BELLOW_MIN_POSITION));
+    stepper.setTargetPositionInMillimeters(toLib(BELLOW_MIN_POSITION));
     movingDirection = true;
     resumeAfterStop();
 }
@@ -282,10 +332,11 @@ void BellowController::resumeAfterStop() {
 }
 
 // =========================================================================================
-// HOMING EN DEUX PASSES
+// CALIBRATION EN DEUX PASSES
 // =========================================================================================
-void BellowController::startHoming() {
+void BellowController::startCalibration() {
     openValve(); // Sans pression : le soufflet doit pouvoir se fermer librement
+    pressure.reset();
     fault = FAULT_NONE;
     homingStartTime = millis();
     startFastApproach();
@@ -295,7 +346,7 @@ void BellowController::startFastApproach() {
     stepper.setSpeedInMillimetersPerSecond(HOMING_SPEED);
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
     stepper.setCurrentPositionInMillimeters(0);
-    stepper.setTargetPositionInMillimeters(-HOMING_MAX_DISTANCE);
+    stepper.setTargetPositionInMillimeters(toLib(-HOMING_MAX_DISTANCE));
     movingDirection = false; // Fermeture
     motorRunning = false;
     state = BELLOW_HOMING_FAST;
@@ -307,7 +358,7 @@ void BellowController::startBackoff() {
     stepper.setSpeedInMillimetersPerSecond(HOMING_SLOW_SPEED);
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
     stepper.setCurrentPositionInMillimeters(0);
-    stepper.setTargetPositionInMillimeters(HOMING_BACKOFF_MM);
+    stepper.setTargetPositionInMillimeters(toLib(HOMING_BACKOFF_MM));
     movingDirection = true; // Ouverture
     motorRunning = false;
     state = BELLOW_HOMING_BACKOFF;
@@ -319,7 +370,7 @@ void BellowController::startSlowApproach() {
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
     stepper.setCurrentPositionInMillimeters(0);
     // Course volontairement courte : on est deja a HOMING_BACKOFF_MM du contact.
-    stepper.setTargetPositionInMillimeters(-(HOMING_BACKOFF_MM * 3.0f));
+    stepper.setTargetPositionInMillimeters(toLib(-(HOMING_BACKOFF_MM * 3.0f)));
     movingDirection = false;
     motorRunning = false;
     state = BELLOW_HOMING_SLOW;
@@ -361,10 +412,10 @@ void BellowController::updateBackoff() {
 void BellowController::finishHoming() {
     stepper.setAccelerationInMillimetersPerSecondPerSecond(STEPPER_MIN_ACCEL);
     state = BELLOW_READY;
-    applyDemand(); // Reprend une eventuelle demande d'air recue pendant le homing
+    applyDemand(); // Reprend une eventuelle demande d'air recue pendant la calibration
 
     #if DEBUG
-    Serial.println(F("[DEBUG] Homing termine"));
+    Serial.println(F("[DEBUG] Calibration terminee"));
     #endif
 }
 
@@ -372,7 +423,7 @@ void BellowController::finishHoming() {
 void BellowController::updateDirection() {
     if (!motorRunning) return;
 
-    float position = stepper.getCurrentPositionInMillimeters();
+    float position = bellowMachinePosition(stepper);
     float normalized = (position - (float)BELLOW_MIN_POSITION) /
                        ((float)BELLOW_MAX_POSITION - (float)BELLOW_MIN_POSITION);
 
@@ -388,13 +439,14 @@ void BellowController::updateDirection() {
 // === CIBLE COURANTE ===
 void BellowController::retarget() {
     if (!motorRunning) return;
-    stepper.setTargetPositionInMillimeters(movingDirection ? (float)BELLOW_MAX_POSITION
-                                                           : (float)BELLOW_MIN_POSITION);
+    stepper.setTargetPositionInMillimeters(toLib(movingDirection ? (float)BELLOW_MAX_POSITION
+                                                                 : (float)BELLOW_MIN_POSITION));
 }
 
 // === DEMANDE D'AIR ===
 void BellowController::setAirDemand(float demand) {
     airDemand = demand;
+    pressure.setDemand(demand);
     applyDemand();
 }
 
@@ -410,7 +462,8 @@ void BellowController::setExpression(byte expressionValue) {
 
 // === CALCUL DE LA VITESSE ET DE LA CIBLE ===
 void BellowController::applyDemand() {
-    // Pendant le homing, un arret ou en defaut, la demande est memorisee mais pas appliquee.
+    // Pendant la calibration, un arret ou en defaut, la demande est memorisee mais pas
+    // appliquee.
     if (state != BELLOW_READY) return;
 
     // CC7 = 0 (ou CC11 = 0) doit reellement couper la production de pression.
@@ -420,7 +473,9 @@ void BellowController::applyDemand() {
     }
 
     float scale = (volume / 127.0f) * (expression / 127.0f);
-    float speed = (float)NORMAL_SPEED * airDemand * scale;
+    // Correction de pression : vaut exactement 1.0 sans capteur, la formule reste alors
+    // strictement celle de la boucle ouverte.
+    float speed = (float)NORMAL_SPEED * airDemand * scale * pressure.scale();
     speed = constrain(speed, (float)STEPPER_MIN_SPEED, maxSpeed);
 
     // Acceleration proportionnelle a la vitesse demandee : attaque franche a fort debit,
@@ -443,6 +498,7 @@ void BellowController::stopPressure() {
     // sur la position courante.
     stepper.setTargetPositionToStop();
     motorRunning = false;
+    pressure.reset();
 }
 
 // === MISE AU REPOS ===
@@ -452,7 +508,7 @@ void BellowController::stopAndDisable() {
 }
 
 // === DEFAUT VERROUILLE ===
-void BellowController::setFault(BellowFault code) {
+void BellowController::setFault(AirFault code) {
     if (state == BELLOW_FAULT) return; // Premier defaut conserve
     fault = code;
     state = BELLOW_FAULT;
@@ -460,6 +516,7 @@ void BellowController::setFault(BellowFault code) {
     motorRunning = false;
     disableMotor(); // Coupure du couple avant tout
     openValve();    // Libere la pression residuelle
+    pressure.reset();
 
     #if DEBUG
     Serial.print(F("[DEBUG] Defaut soufflet: "));
@@ -470,17 +527,11 @@ void BellowController::setFault(BellowFault code) {
 void BellowController::clearFault() {
     if (state != BELLOW_FAULT) return;
     fault = FAULT_NONE;
-    startHoming();
+    startCalibration();
 }
 
-// === OUVERTURE DE LA VALVE ===
-void BellowController::openValve() {
-    servoController.setServoAngle(VALVE_PCA_ADDRESS, VALVE_PCA_PIN, VALVE_PCA_ANGLE_OPEN);
-    valveOpen = true;
-}
+// === VALVE GENERALE ===
+void BellowController::openValve()  { airValve.open(); }
+void BellowController::closeValve() { airValve.close(); }
 
-// === FERMETURE DE LA VALVE ===
-void BellowController::closeValve() {
-    servoController.setServoAngle(VALVE_PCA_ADDRESS, VALVE_PCA_PIN, VALVE_PCA_ANGLE_CLOSE);
-    valveOpen = false;
-}
+#endif // AIR_SOURCE_BELLOW_STEPPER

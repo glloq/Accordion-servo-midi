@@ -1,201 +1,388 @@
 #ifndef SETTINGS_H
 #define SETTINGS_H
 
-#include <Arduino.h>   // Assure la prise en charge de `uint8_t`
-#include "noteMapping.h" // Table des notes, adresses PCA et angles servos
-
-//===========================================================================================================
-// === CONFIGURATION GENERALE ===
-//===========================================================================================================
-
-// === CONFIGURATION DES CANAUX MIDI ===
-#define MIDI_CHANNEL_LEFT 1  // Canal MIDI dedie a la main gauche
-#define MIDI_CHANNEL_RIGHT 2 // Canal MIDI dedie a la main droite
-
-// === TRANSPORTS MIDI ===
-// Definissables depuis la ligne de compilation (-DMIDI_TRANSPORT_USB=1).
-// DIN  : MIDI serie classique sur Serial1 (broches 0/1 du Leonardo).
-// USB  : MIDI USB natif du Leonardo/Micro, necessite la bibliotheque "USB-MIDI" (lathoub).
-//        Desactive par defaut pour ne pas imposer la dependance a l'IDE Arduino.
-#ifndef MIDI_TRANSPORT_DIN
-#define MIDI_TRANSPORT_DIN 1
-#endif
-#ifndef MIDI_TRANSPORT_USB
-#define MIDI_TRANSPORT_USB 0
-#endif
-
-#define DEBUG false
-
-// Frequence du bus I2C des PCA9685. Le PCA9685 supporte 1 MHz ; 400 kHz raccourcit
-// nettement le temps de commande des 59 servos. Repasser a 100000 en cas de bus long
-// ou d'erreurs de transmission.
-#define I2C_CLOCK_HZ 400000L
-
-// Delai de debounce pour les fins de course (en millisecondes).
-// ATTENTION : ce delai ne retarde JAMAIS l'arret. Le contact brut coupe immediatement le
-// driver ; le debounce ne sert qu'a decider ensuite si le contact etait reel (recalage +
-// inversion) ou parasite (reprise). A 25 mm/s, attendre 50 ms avant de couper aurait
-// represente 1,25 mm de surcourse.
-#define ENDSTOP_DEBOUNCE_MS 50
-
-// Nombre maximum de notes simultanees (protection alimentation 5V/10A)
-#define MAX_SIMULTANEOUS_NOTES 15
-
-//===========================================================================================================
-//==== Gestion du moteur pas a pas
-//===========================================================================================================
-// === CONFIGURATION DU SOUFFLET ===
-// Vitesse de reference pour une seule note active (airFlowMultiplier = 1.0) en mm/s.
-#define NORMAL_SPEED 10
-
-// Plage de mouvement du soufflet (position en mm)
-#define BELLOW_MIN_POSITION 0
-#define BELLOW_MAX_POSITION 200 // ouverture maximum du soufflet en mm (jusqu'au fin de course)
-
-// === SEUILS DE SECURITE DU SOUFFLET ===
-// Inversion du sens AVANT d'atteindre les fins de course. Ces seuils sont evalues en
-// continu dans BellowController::update(), pas uniquement sur evenement MIDI.
-#define BELLOW_REVERSE_THRESHOLD_OPEN 0.7f  // Inversion a 70% d'ouverture
-#define BELLOW_REVERSE_THRESHOLD_CLOSE 0.3f // Inversion a 30% de fermeture
-
-// === CONFIGURATION DES FINS DE COURSE ===
-// ATTENTION : sur Arduino Leonardo / Micro, D2 et D3 sont SDA et SCL (bus I2C des PCA9685).
-// Les fins de course ne doivent donc JAMAIS utiliser ces broches.
-#define LIMIT_SWITCH_MIN_PIN 5 // Fin de course bas (fermeture complete)
-#define LIMIT_SWITCH_MAX_PIN 6 // Fin de course haut (ouverture maximale)
-
-// === CONFIGURATION MOTEURS ===
-// Vitesses minimale et maximale (en mm/s)
-#define STEPPER_MIN_SPEED 2
-#define STEPPER_MAX_SPEED 300
-// Accelerations minimale et maximale (en mm/s^2)
-#define STEPPER_MIN_ACCEL 5
-#define STEPPER_MAX_ACCEL 100
-
-// Frequence de pas maximale reellement tenable par le MCU avec FlexyStepper.
-// FlexyStepper ne produit qu'UN pas par appel a processMovement() : la frequence reelle
-// est donc bornee par la periode de la boucle principale, pas seulement par le CPU.
-// D'ou l'ordonnancement retenu : un seul message MIDI par tour de boucle et plusieurs
-// appels de service au generateur de pas (STEPPER_SERVICE_CALLS).
-// Le test test_timing mesure la frequence reellement atteinte ; ajuster cette valeur en
-// fonction de la mesure sur la machine reelle.
-#define STEPPER_MAX_STEP_RATE_HZ 10000.0f
-
-// Nombre d'appels a processMovement() par tour de boucle. processMovement() est
-// auto-limite par micros() : les appels en trop sont quasi gratuits, mais ils permettent
-// de rattraper les pas perdus pendant une rafale MIDI ou une ecriture I2C (~110 us).
-#define STEPPER_SERVICE_CALLS 4
-
-// Deceleration utilisee pour l'arret d'urgence sur fin de course (mm/s^2).
-// Le driver etant deja coupe a ce moment-la, cette rampe ne produit aucun mouvement
-// physique : elle sert uniquement a ramener rapidement l'etat interne de FlexyStepper a
-// l'arret, seule condition ou setCurrentPosition() est legitime.
-#define STEPPER_EMERGENCY_DECEL 5000.0f
-
-// Duree max de la sequence d'arret avant declaration de defaut (ms)
-#define STEPPER_STOP_TIMEOUT_MS 1000UL
-
-// Temps avant de desactiver le moteur et fermer la valve du soufflet (en millisecondes)
-#define BELLOW_INACTIVITY_TIMEOUT 60000UL // 1 minute
-
-// Broches utilisees pour le moteur pas a pas en Step/Dir
-#define STEPPER_DIR_PIN 9     // Direction
-#define STEPPER_STEP_PIN 10   // Step
-#define STEPPER_EN_PIN 11     // Enable (actif bas)
-
-//-----------------------------------------------------------------------------------------
-// === PARAMETRES MECANIQUES DE LA TRANSMISSION ===
-// STEPS_PER_MM est calcule, plus code en dur : une erreur ici se traduit directement par
-// une erreur de course d'un facteur MICRO_STEP (jusqu'a x16).
+// =========================================================================================
+//  VALEURS DERIVEES ET VERIFICATIONS
+// -----------------------------------------------------------------------------------------
+//  Ce fichier ne contient AUCUN choix : tous les reglages sont dans config.h. On trouve ici
+//  ce qui en decoule (pas par millimetre, bornes reellement tenables, niveaux logiques) et
+//  les verifications a la compilation qui attrapent les configurations impossibles avant
+//  qu'elles n'abiment la mecanique.
 //
-// !! MICRO_STEP doit correspondre au reglage PHYSIQUE du TMC2209 (cavaliers MS1/MS2,
-// ou configuration UART). En mode standalone, MS1=MS2=LOW donne 1/8 sur la plupart des
-// modules TMC2209, PAS 1/16. Verifier la doc du module avant le premier essai mecanique.
-#define MOTOR_STEPS_PER_REV 200  // Moteur NEMA17 1.8 deg => 200 pas/tour
-#define MICRO_STEP 16            // Micro-pas du driver (doit refleter le cablage MS1/MS2)
-#define SCREW_LEAD_MM 16.0f      // Pas de la tige filetee : avance en mm par tour de vis
-#define GEAR_RATIO 2.0f          // Reduction poulies 1/2 : 2 tours moteur = 1 tour de vis
+//  Pour changer la machine : editer config.h, ou mieux, la regenerer depuis
+//  tools/configurator/index.html.
+// =========================================================================================
 
-// Pas par millimetre reellement envoyes au driver.
-// Ex. 200 * 16 * 2 / 16 = 400 pas/mm.
-#define STEPS_PER_MM (((float)MOTOR_STEPS_PER_REV * (float)MICRO_STEP * GEAR_RATIO) / SCREW_LEAD_MM)
+#include <Arduino.h>     // Assure la prise en charge de `uint8_t`
+#include "config.h"      // Les reglages de la machine
+#include "noteMapping.h" // Table des notes, adresses PCA, angles
+#include "staticAssert.h"
 
-// Compromis microstepping / vitesse : la vitesse maximale utile vaut
-// STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM, soit ~25 mm/s a 400 pas/mm. Si le soufflet
-// doit aller plus vite (beaucoup de notes simultanees), il faut REDUIRE MICRO_STEP
-// (1/8 -> 50 mm/s, 1/4 -> 100 mm/s) et non augmenter STEPPER_MAX_SPEED, qui est de toute
-// facon borne a l'execution par BellowController::begin().
-//-----------------------------------------------------------------------------------------
+//===========================================================================================
+// 1. VERIFICATIONS GENERALES
+//===========================================================================================
 
-// === CALIBRATION (HOMING) ===
-// Homing en deux passes, comme sur une machine-outil : approche rapide, degagement, puis
-// reapproche lente. Le premier contact sert seulement a localiser grossierement la butee ;
-// la surcourse eventuelle (driver coupe en urgence) est donc sans effet sur le zero final,
-// qui est etabli par la seconde approche, lente.
-#define HOMING_SPEED 10.0f            // Approche rapide (mm/s)
-#define HOMING_SLOW_SPEED 1.5f        // Reapproche lente, fixe le zero (mm/s)
-#define HOMING_BACKOFF_MM 4.0f        // Degagement entre les deux approches (mm)
-#define HOMING_MAX_DISTANCE 250.0f    // Course max de l'approche rapide (mm)
-#define HOMING_TIMEOUT_MS 60000UL     // Duree max de TOUT le homing, deux passes comprises
+#if !MIDI_TRANSPORT_DIN && !MIDI_TRANSPORT_USB
+#error "Aucun transport MIDI actif : definir MIDI_TRANSPORT_DIN et/ou MIDI_TRANSPORT_USB."
+#endif
 
-//===========================================================================================================
-// === Gestion des notes / servomoteurs
-//===========================================================================================================
-// La table des notes (NoteConfig, RIGHT_HAND_MAPPING, LEFT_HAND_MAPPING), les adresses des
-// PCA9685 et les angles servos sont definis dans noteMapping.h.
+#if MAX_SIMULTANEOUS_NOTES < 1
+#error "MAX_SIMULTANEOUS_NOTES doit valoir au moins 1."
+#endif
 
-// === REPONSE A LA VELOCITE ===
-// La velocite n'agit pas sur les servos (une valve est ouverte ou fermee) mais sur la
-// demande d'air. Elle est appliquee PAR NOTE : chaque note ouverte pondere son propre
-// debit. Une note jouee doucement au milieu d'un accord fort ne fait donc plus chuter le
-// debit de tout l'accord, et inversement.
-//   debit_total = somme( airFlowMultiplier_i * poidsTenu(velocity_i) )
-//   poidsTenu(v) = VELOCITY_SUSTAIN_MIN + (1 - VELOCITY_SUSTAIN_MIN) * v/127
-// L'attaque est un supplement temporaire applique a la SEULE derniere note declenchee :
-//   bonus = airFlow_derniere * poidsTenu(v) * VELOCITY_ATTACK_BOOST * v/127
-#define VELOCITY_SUSTAIN_MIN 0.60f  // Facteur de debit pour velocity = 1
-#define VELOCITY_ATTACK_BOOST 0.50f // Surcroit de debit pendant l'attaque (a velocity = 127)
-#define VELOCITY_ATTACK_MS 120UL    // Duree de la phase d'attaque
+#if (NUM_NOTES_RIGHT + NUM_NOTES_LEFT) < 1
+#error "L'instrument n'a aucune note : renseigner RIGHT_HAND_NOTE_LIST et/ou LEFT_HAND_NOTE_LIST."
+#endif
 
-// Poids du niveau tenu pour une velocite donnee.
+#if NUM_PCA_TOTAL < 1
+#error "Au moins un PCA9685 est necessaire pour piloter les actionneurs."
+#endif
+
+#if SERVO_MIN_PWM >= SERVO_MAX_PWM
+#error "SERVO_MIN_PWM doit etre strictement inferieur a SERVO_MAX_PWM."
+#endif
+
+#if SERVO_MIN_ANGLE >= SERVO_MAX_ANGLE
+#error "SERVO_MIN_ANGLE doit etre strictement inferieur a SERVO_MAX_ANGLE."
+#endif
+
+#if AIR_SOURCE < AIR_SOURCE_BELLOW_STEPPER || AIR_SOURCE > AIR_SOURCE_PUMP_ONOFF
+#error "AIR_SOURCE ne designe aucune source d'air connue (voir airSourceTypes.h)."
+#endif
+
+// Broches du bus I2C. Sur Leonardo / Micro ce sont D2 (SDA) et D3 (SCL) ; un autre MCU peut
+// les avoir ailleurs, d'ou la possibilite de les redefinir dans config.h.
+#ifndef I2C_SDA_PIN
+#define I2C_SDA_PIN 2
+#endif
+#ifndef I2C_SCL_PIN
+#define I2C_SCL_PIN 3
+#endif
+
+// Toute broche partagee avec le bus I2C fait tomber les PCA9685 des qu'elle est utilisee.
+#define ACCORDION_PIN_IS_I2C(p) ((p) == I2C_SDA_PIN || (p) == I2C_SCL_PIN)
+
+//===========================================================================================
+// 2. ACTIONNEURS ET NOTES
+//===========================================================================================
+
+// Taille des tableaux d'etat d'une main : la plus grande des deux mains suffit.
+#if NUM_NOTES_RIGHT >= NUM_NOTES_LEFT
+  #define MAX_NOTES_PER_HAND NOTE_TABLE_SIZE(NUM_NOTES_RIGHT)
+#else
+  #define MAX_NOTES_PER_HAND NOTE_TABLE_SIZE(NUM_NOTES_LEFT)
+#endif
+
+// Le vol de voix et le suivi d'anciennete manipulent des index sur un octet.
+#if MAX_NOTES_PER_HAND > 127
+#error "Plus de 127 notes par main : les index de note ne tiennent plus sur un int8_t."
+#endif
+
+#if NOTE_ACTUATOR == ACTUATOR_SOLENOID
+  #if SOLENOID_HOLD_PERCENT < 1 || SOLENOID_HOLD_PERCENT > 100
+  #error "SOLENOID_HOLD_PERCENT doit etre compris entre 1 et 100."
+  #endif
+  // Comptes PCA9685 correspondant au courant de maintien (0-4095).
+  #define SOLENOID_HOLD_COUNTS ((uint16_t)((4095L * SOLENOID_HOLD_PERCENT) / 100))
+#endif
+
+// --- OE des PCA9685 ---
+#if PCA_OE_MODE == PCA_OE_SHARED
+  #if ACCORDION_PIN_IS_I2C(PCA_OE_PIN)
+  #error "PCA_OE_PIN est cablee sur le bus I2C : les PCA9685 ne repondront plus."
+  #endif
+#endif
+
+//===========================================================================================
+// 3. VALVE GENERALE
+//===========================================================================================
+
+#if AIR_VALVE_TYPE == AIR_VALVE_SERVO
+  #if VALVE_PCA_INDEX >= NUM_PCA_TOTAL
+  #error "VALVE_PCA_INDEX depasse le nombre de PCA9685 declares."
+  #endif
+  #if VALVE_PCA_PIN > 15
+  #error "VALVE_PCA_PIN doit etre un canal PCA9685 valide (0-15)."
+  #endif
+#elif AIR_VALVE_TYPE == AIR_VALVE_SOLENOID
+  #if ACCORDION_PIN_IS_I2C(VALVE_SOLENOID_PIN)
+  #error "VALVE_SOLENOID_PIN est cablee sur le bus I2C."
+  #endif
+#endif
+
+//===========================================================================================
+// 4. SOURCE D'AIR : VALEURS DERIVEES ET VERIFICATIONS
+//===========================================================================================
+
+// Les deux familles de soufflets partagent la logique d'oscillation : la pression se cree
+// en ouvrant ET en fermant, avec inversion avant les butees. Les turbines et pompes, elles,
+// sont unidirectionnelles.
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER || AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+  #define AIR_SOURCE_IS_BELLOW 1
+#else
+  #define AIR_SOURCE_IS_BELLOW 0
+#endif
+
+// Seule la source pas a pas possede une course mesuree, des fins de course et un homing.
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+  #define AIR_SOURCE_HAS_HOMING 1
+#else
+  #define AIR_SOURCE_HAS_HOMING 0
+#endif
+
+//-------------------------------------------------------------------------------------------
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+//-------------------------------------------------------------------------------------------
+
+// --- Pas par millimetre, CALCULE et non code en dur --------------------------------------
+// Une erreur ici se traduit directement par une erreur de course d'un facteur MICRO_STEP
+// (jusqu'a x16). D'ou le calcul a partir des grandeurs physiques mesurables.
+#if BELLOW_TRANSMISSION == TRANSMISSION_SCREW
+  #define TRAVEL_PER_OUTPUT_REV_MM (SCREW_LEAD_MM)
+#elif BELLOW_TRANSMISSION == TRANSMISSION_BELT
+  #define TRAVEL_PER_OUTPUT_REV_MM ((float)BELT_PITCH_MM * (float)BELT_PULLEY_TEETH)
+#else
+  #error "BELLOW_TRANSMISSION inconnue (voir TRANSMISSION_* dans airSourceTypes.h)."
+#endif
+
+// Ex. 200 pas * 16 micro-pas * 2 (reduction) / 16 mm = 400 pas/mm.
+#define STEPS_PER_MM (((float)MOTOR_STEPS_PER_REV * (float)MICRO_STEP * (float)GEAR_RATIO) \
+                      / (float)TRAVEL_PER_OUTPUT_REV_MM)
+
+// Vitesse maximale reellement atteignable, compte tenu du debit de pas. Au-dela, le moteur
+// decroche silencieusement. Pour aller plus vite il faut REDUIRE MICRO_STEP (1/8 -> x2,
+// 1/4 -> x4) et non augmenter STEPPER_MAX_SPEED.
+#define STEPPER_RATE_LIMITED_SPEED (STEPPER_MAX_STEP_RATE_HZ / STEPS_PER_MM)
+
+#if BELLOW_MAX_POSITION <= BELLOW_MIN_POSITION
+#error "BELLOW_MAX_POSITION doit etre strictement superieure a BELLOW_MIN_POSITION."
+#endif
+#if STEPPER_MIN_SPEED >= STEPPER_MAX_SPEED
+#error "STEPPER_MIN_SPEED doit etre strictement inferieure a STEPPER_MAX_SPEED."
+#endif
+#if ACCORDION_PIN_IS_I2C(LIMIT_SWITCH_MIN_PIN) || ACCORDION_PIN_IS_I2C(LIMIT_SWITCH_MAX_PIN)
+#error "Un fin de course est cable sur SDA/SCL : le bus des PCA9685 serait perdu."
+#endif
+#if LIMIT_SWITCH_MIN_PIN == LIMIT_SWITCH_MAX_PIN
+#error "Les deux fins de course partagent la meme broche."
+#endif
+#if ACCORDION_PIN_IS_I2C(STEPPER_STEP_PIN) || ACCORDION_PIN_IS_I2C(STEPPER_DIR_PIN) || \
+    ACCORDION_PIN_IS_I2C(STEPPER_EN_PIN)
+#error "Une broche du driver pas a pas est cablee sur SDA/SCL."
+#endif
+#if STEPPER_STEP_PIN == STEPPER_DIR_PIN || STEPPER_STEP_PIN == STEPPER_EN_PIN || \
+    STEPPER_DIR_PIN == STEPPER_EN_PIN
+#error "Deux broches du driver pas a pas partagent le meme numero."
+#endif
+// Comparaisons sur des flottants : le preprocesseur ne sait pas les evaluer, ces
+// verifications passent donc par static_assert (voir staticAssert.h).
+ACCORDION_STATIC_ASSERT(HOMING_BACKOFF_MM > 0.0f, HOMING_BACKOFF_MM_doit_etre_positif);
+ACCORDION_STATIC_ASSERT(HOMING_SLOW_SPEED > 0.0f, HOMING_SLOW_SPEED_doit_etre_positif);
+ACCORDION_STATIC_ASSERT(HOMING_SPEED > 0.0f, HOMING_SPEED_doit_etre_positif);
+ACCORDION_STATIC_ASSERT(HOMING_MAX_DISTANCE > HOMING_BACKOFF_MM,
+                        HOMING_MAX_DISTANCE_trop_courte);
+ACCORDION_STATIC_ASSERT(BELLOW_REVERSE_THRESHOLD_CLOSE > 0.0f &&
+                        BELLOW_REVERSE_THRESHOLD_CLOSE < BELLOW_REVERSE_THRESHOLD_OPEN &&
+                        BELLOW_REVERSE_THRESHOLD_OPEN < 1.0f,
+                        Seuils_d_inversion_du_soufflet_incoherents);
+ACCORDION_STATIC_ASSERT(STEPS_PER_MM > 0.0f, STEPS_PER_MM_doit_etre_positif);
+
+// Inversion logicielle du sens. FlexyStepper ne l'expose pas : le signe est donc applique
+// a la frontiere de la bibliotheque, sur les positions et les cibles. Le firmware, lui,
+// continue de raisonner dans le repere de la machine (0 = soufflet ferme).
+#if STEPPER_INVERT_DIR
+  #define STEPPER_DIR_SIGN (-1.0f)
+#else
+  #define STEPPER_DIR_SIGN (1.0f)
+#endif
+
+// Niveaux logiques, deduits du cablage declare.
+#if STEPPER_EN_ACTIVE_LOW
+  #define STEPPER_EN_ON  LOW
+  #define STEPPER_EN_OFF HIGH
+#else
+  #define STEPPER_EN_ON  HIGH
+  #define STEPPER_EN_OFF LOW
+#endif
+
+#endif // AIR_SOURCE_BELLOW_STEPPER
+
+//-------------------------------------------------------------------------------------------
+#if AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+//-------------------------------------------------------------------------------------------
+#if BELLOW_SERVO_PCA_INDEX >= NUM_PCA_TOTAL
+#error "BELLOW_SERVO_PCA_INDEX depasse le nombre de PCA9685 declares."
+#endif
+#if BELLOW_SERVO_PCA_PIN > 15
+#error "BELLOW_SERVO_PCA_PIN doit etre un canal PCA9685 valide (0-15)."
+#endif
+#if BELLOW_SERVO_ANGLE_CLOSED == BELLOW_SERVO_ANGLE_OPEN
+#error "Le soufflet a servo n'a aucune course : angles ouvert et ferme identiques."
+#endif
+ACCORDION_STATIC_ASSERT(BELLOW_SERVO_MIN_SPEED_DPS > 0.0f &&
+                        BELLOW_SERVO_MIN_SPEED_DPS <= BELLOW_SERVO_MAX_SPEED_DPS,
+                        Vitesses_de_balayage_du_soufflet_a_servo_incoherentes);
+ACCORDION_STATIC_ASSERT(BELLOW_SERVO_DEMAND_FULL_SCALE > 1.0f,
+                        BELLOW_SERVO_DEMAND_FULL_SCALE_doit_depasser_1);
+ACCORDION_STATIC_ASSERT(BELLOW_SERVO_REVERSE_CLOSE >= 0.0f &&
+                        BELLOW_SERVO_REVERSE_CLOSE < BELLOW_SERVO_REVERSE_OPEN &&
+                        BELLOW_SERVO_REVERSE_OPEN <= 1.0f,
+                        Seuils_d_inversion_du_soufflet_a_servo_incoherents);
+#endif // AIR_SOURCE_BELLOW_SERVO
+
+//-------------------------------------------------------------------------------------------
+#if AIR_SOURCE == AIR_SOURCE_BLOWER_PWM
+//-------------------------------------------------------------------------------------------
+#if ACCORDION_PIN_IS_I2C(BLOWER_PWM_PIN)
+#error "BLOWER_PWM_PIN est cablee sur le bus I2C."
+#endif
+#if BLOWER_DUTY_MIN >= BLOWER_DUTY_MAX
+#error "BLOWER_DUTY_MIN doit etre strictement inferieur a BLOWER_DUTY_MAX."
+#endif
+#if BLOWER_DUTY_MAX > 255
+#error "BLOWER_DUTY_MAX depasse la resolution d'analogWrite (0-255)."
+#endif
+ACCORDION_STATIC_ASSERT(BLOWER_DEMAND_FULL_SCALE > 0.0f,
+                        BLOWER_DEMAND_FULL_SCALE_doit_etre_positif);
+#endif // AIR_SOURCE_BLOWER_PWM
+
+//-------------------------------------------------------------------------------------------
+#if AIR_SOURCE == AIR_SOURCE_BLOWER_ESC
+//-------------------------------------------------------------------------------------------
+#if ESC_PCA_INDEX >= NUM_PCA_TOTAL
+#error "ESC_PCA_INDEX depasse le nombre de PCA9685 declares."
+#endif
+#if ESC_PCA_PIN > 15
+#error "ESC_PCA_PIN doit etre un canal PCA9685 valide (0-15)."
+#endif
+#if ESC_PULSE_MIN_US >= ESC_PULSE_MAX_US
+#error "ESC_PULSE_MIN_US doit etre strictement inferieure a ESC_PULSE_MAX_US."
+#endif
+#if ESC_PULSE_IDLE_US < ESC_PULSE_MIN_US || ESC_PULSE_IDLE_US > ESC_PULSE_MAX_US
+#error "ESC_PULSE_IDLE_US doit rester entre ESC_PULSE_MIN_US et ESC_PULSE_MAX_US."
+#endif
+ACCORDION_STATIC_ASSERT(ESC_DEMAND_FULL_SCALE > 0.0f, ESC_DEMAND_FULL_SCALE_doit_etre_positif);
+// Une impulsion de 2 ms ne tient pas dans une periode de 5 ms si la frequence PCA est trop
+// haute ; a 50 Hz la periode vaut 20 ms, ce qui convient a tous les ESC courants.
+#if SERVO_PWM_FREQUENCY > 400
+#error "SERVO_PWM_FREQUENCY est trop elevee pour un ESC : rester a 50 Hz (ou 400 Hz maximum)."
+#endif
+#endif // AIR_SOURCE_BLOWER_ESC
+
+//-------------------------------------------------------------------------------------------
+#if AIR_SOURCE == AIR_SOURCE_PUMP_ONOFF
+//-------------------------------------------------------------------------------------------
+#if ACCORDION_PIN_IS_I2C(PUMP_PIN)
+#error "PUMP_PIN est cablee sur le bus I2C."
+#endif
+#if PUMP_MIN_DUTY_PERCENT < 1 || PUMP_MAX_DUTY_PERCENT > 100
+#error "Les rapports cycliques de la pompe doivent rester entre 1 et 100 %."
+#endif
+#if PUMP_MIN_DUTY_PERCENT > PUMP_MAX_DUTY_PERCENT
+#error "PUMP_MIN_DUTY_PERCENT depasse PUMP_MAX_DUTY_PERCENT."
+#endif
+#if PUMP_CYCLE_MS < 20
+#error "PUMP_CYCLE_MS trop court : une pompe tout-ou-rien ne suit pas une modulation rapide."
+#endif
+ACCORDION_STATIC_ASSERT(PUMP_DEMAND_FULL_SCALE > 0.0f, PUMP_DEMAND_FULL_SCALE_doit_etre_positif);
+#endif // AIR_SOURCE_PUMP_ONOFF
+
+//===========================================================================================
+// 5. REGULATION DE PRESSION
+//===========================================================================================
+
+#if PRESSURE_SENSOR_ENABLED
+  ACCORDION_STATIC_ASSERT(PRESSURE_ADC_PER_KPA > 0.0f,
+                          PRESSURE_ADC_PER_KPA_doit_etre_positif);
+  ACCORDION_STATIC_ASSERT(PRESSURE_MAX_KPA > PRESSURE_TARGET_KPA,
+                          PRESSURE_MAX_KPA_doit_depasser_PRESSURE_TARGET_KPA);
+  ACCORDION_STATIC_ASSERT(PRESSURE_FILTER_ALPHA > 0.0f && PRESSURE_FILTER_ALPHA <= 1.0f,
+                          PRESSURE_FILTER_ALPHA_hors_de_l_intervalle_0_1);
+  ACCORDION_STATIC_ASSERT(PRESSURE_SCALE_MIN > 0.0f && PRESSURE_SCALE_MIN < 1.0f &&
+                          PRESSURE_SCALE_MAX > 1.0f,
+                          Bornes_du_facteur_correctif_de_pression_incoherentes);
+  #if PRESSURE_SAMPLE_MS < 1
+  #error "PRESSURE_SAMPLE_MS doit valoir au moins 1 ms."
+  #endif
+  // La pompe tout-ou-rien n'a pas d'autre reglage continu : sans capteur elle module son
+  // rapport cyclique, avec capteur elle regule par hysteresis.
+  #define PRESSURE_CLOSED_LOOP (PRESSURE_CONTROL != PRESSURE_CONTROL_OPEN_LOOP)
+#else
+  #define PRESSURE_CLOSED_LOOP 0
+#endif
+
+//===========================================================================================
+// 6. CONFLITS DE BROCHES ENTRE MODULES
+//===========================================================================================
+// Chaque module verifie deja ses propres broches ; ce qui manque est la verification
+// CROISEE, celle qu'un fichier ecrit a la main rate systematiquement : la broche OE des PCA
+// reutilisee pour la pompe, l'electrovanne posee sur ENABLE du driver... Ces erreurs ne se
+// voient pas a la compilation et se paient sur la mecanique.
+//
+// Seules les broches de la configuration REELLEMENT compilee sont confrontees : les
+// parametres des sources d'air inutilisees n'ont pas a etre coherents.
+
+// Broche de la source d'air ayant besoin d'etre distincte du reste (0 = aucune).
+#if AIR_SOURCE == AIR_SOURCE_BLOWER_PWM
+  #define AIR_SOURCE_POWER_PIN BLOWER_PWM_PIN
+#elif AIR_SOURCE == AIR_SOURCE_PUMP_ONOFF
+  #define AIR_SOURCE_POWER_PIN PUMP_PIN
+#endif
+
+#if PCA_OE_MODE == PCA_OE_SHARED
+  #if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+    #if PCA_OE_PIN == STEPPER_STEP_PIN || PCA_OE_PIN == STEPPER_DIR_PIN || \
+        PCA_OE_PIN == STEPPER_EN_PIN || PCA_OE_PIN == LIMIT_SWITCH_MIN_PIN || \
+        PCA_OE_PIN == LIMIT_SWITCH_MAX_PIN
+    #error "PCA_OE_PIN entre en conflit avec une broche du soufflet pas a pas."
+    #endif
+  #endif
+  #ifdef AIR_SOURCE_POWER_PIN
+    #if PCA_OE_PIN == AIR_SOURCE_POWER_PIN
+    #error "PCA_OE_PIN entre en conflit avec la broche de puissance de la source d'air."
+    #endif
+  #endif
+  #if AIR_VALVE_TYPE == AIR_VALVE_SOLENOID && PCA_OE_PIN == VALVE_SOLENOID_PIN
+  #error "PCA_OE_PIN entre en conflit avec l'electrovanne de mise a l'air libre."
+  #endif
+#endif
+
+#if AIR_VALVE_TYPE == AIR_VALVE_SOLENOID
+  #if AIR_SOURCE == AIR_SOURCE_BELLOW_STEPPER
+    #if VALVE_SOLENOID_PIN == STEPPER_STEP_PIN || VALVE_SOLENOID_PIN == STEPPER_DIR_PIN || \
+        VALVE_SOLENOID_PIN == STEPPER_EN_PIN || VALVE_SOLENOID_PIN == LIMIT_SWITCH_MIN_PIN || \
+        VALVE_SOLENOID_PIN == LIMIT_SWITCH_MAX_PIN
+    #error "VALVE_SOLENOID_PIN entre en conflit avec une broche du soufflet pas a pas."
+    #endif
+  #endif
+  #ifdef AIR_SOURCE_POWER_PIN
+    #if VALVE_SOLENOID_PIN == AIR_SOURCE_POWER_PIN
+    #error "VALVE_SOLENOID_PIN entre en conflit avec la broche de puissance de la source d'air."
+    #endif
+  #endif
+#endif
+
+// Une valve generale portee par un PCA doit occuper un canal libre. Le canal de l'ESC et
+// celui du servo de soufflet aussi : test_note_mapping verifie qu'aucune note ne les
+// reclame, mais rien n'empeche deux organes de se poser sur le meme canal.
+#if AIR_VALVE_TYPE == AIR_VALVE_SERVO && AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+  #if VALVE_PCA_INDEX == BELLOW_SERVO_PCA_INDEX && VALVE_PCA_PIN == BELLOW_SERVO_PCA_PIN
+  #error "La valve generale et le servo de soufflet partagent le meme canal PCA."
+  #endif
+#endif
+#if AIR_VALVE_TYPE == AIR_VALVE_SERVO && AIR_SOURCE == AIR_SOURCE_BLOWER_ESC
+  #if VALVE_PCA_INDEX == ESC_PCA_INDEX && VALVE_PCA_PIN == ESC_PCA_PIN
+  #error "La valve generale et l'ESC partagent le meme canal PCA."
+  #endif
+#endif
+
+//===========================================================================================
+// 7. HELPERS PARTAGES
+//===========================================================================================
+
+// Poids du niveau tenu pour une velocite donnee (voir config.h, section velocite).
 inline float velocitySustainWeight(uint8_t velocity) {
     return VELOCITY_SUSTAIN_MIN + (1.0f - VELOCITY_SUSTAIN_MIN) * ((float)velocity / 127.0f);
 }
-
-// === CONFIGURATION DES SERVOMOTEURS ===
-// Frequence des servomoteurs (50Hz recommande pour la plupart des servos)
-#define SERVO_PWM_FREQUENCY 50
-// Delai avant desactivation des PCA apres la DERNIERE commande servo (en millisecondes).
-// Compte a partir du dernier setServoAngle() et non de la derniere note : cela garantit
-// qu'un servo (notamment la valve generale) a le temps d'atteindre sa position avant que
-// l'OE ne coupe le signal PWM.
-#define PCA_DISABLE_DELAY 500
-// Espacement entre servos lors de la fermeture initiale, pour eviter un appel de courant
-// simultane des 59 servos au demarrage (en millisecondes).
-#define SERVO_INIT_STAGGER_MS 15
-// Nombre d'erreurs I2C consecutives tolerees avant passage en defaut.
-// Un PCA9685 qui cesse de repondre en cours de jeu laisse des anches ouvertes.
-#define SERVO_I2C_ERROR_LIMIT 8
-
-// Valeurs standard pour les positions des servos
-#define SERVO_MIN_ANGLE 0    // Angle minimum du servo
-#define SERVO_MAX_ANGLE 180  // Angle maximum du servo
-
-// Plage PWM correspondant aux angles (adapte aux servos 50Hz)
-#define SERVO_MIN_PWM 150   // Correspond a ~0 deg (PWM bas)
-#define SERVO_MAX_PWM 600   // Correspond a ~180 deg (PWM haut)
-
-// === CONFIGURATION DE LA VALVE GENERALE ===
-// VALVE_PCA_ADDRESS / VALVE_PCA_PIN / VALVE_PCA_ANGLE_* sont definis dans noteMapping.h,
-// avec l'allocation des canaux PCA.
-
-// === BROCHE OE DES PCA9685 ===
-// Une seule broche pilote l'OE des 4 PCA9685 (simplification du cablage).
-// ATTENTION : OE ne coupe QUE les sorties PWM du PCA9685. Le rail +5V des 59 servos reste
-// alimente. Pour une vraie mise hors tension il faudrait un load switch / MOSFET high-side
-// en amont de chaque banc de servos.
-// Consequence : la valve generale partage cet OE avec toutes les notes. Instrument ne coupe
-// l'OE qu'a l'etat READY/FAULT et seulement PCA_DISABLE_DELAY apres la derniere commande.
-#define PCA_OE_PIN 4
 
 #endif

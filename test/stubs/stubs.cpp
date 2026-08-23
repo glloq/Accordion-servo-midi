@@ -5,6 +5,8 @@
 
 unsigned long stubMicros = 0;
 int stubPinState[32];
+int stubAnalogOut[32];
+int stubAnalogIn[32];
 
 FlexyStepper *g_stepper = 0;
 float stubPhysicalPos = 0.0f;
@@ -31,7 +33,11 @@ void stubResetMachine(float physicalStart, float minSwitch, float maxSwitch) {
     stubI2cWrites = 0;
     stubI2cErrors = 0;
     stubMissingPcaMask = 0;
-    for (int i = 0; i < 32; i++) stubPinState[i] = HIGH;
+    for (int i = 0; i < 32; i++) {
+        stubPinState[i] = HIGH;
+        stubAnalogOut[i] = -1;
+        stubAnalogIn[i] = 0;
+    }
 }
 
 // ENABLE du driver : actif bas. Le firmware ecrit cette broche.
@@ -42,6 +48,8 @@ unsigned long millis() { return stubMicros / 1000UL; }
 void delay(unsigned long ms) { stubMicros += ms * 1000UL; }
 
 void pinMode(uint8_t, uint8_t) {}
+void analogWrite(uint8_t p, int v) { if (p < 32) stubAnalogOut[p] = v; }
+int analogRead(uint8_t p) { return (p < 32) ? stubAnalogIn[p] : 0; }
 void digitalWrite(uint8_t p, uint8_t v) { if (p < 32) stubPinState[p] = v; }
 
 // Les fins de course sont DEDUITS de la position physique : ce sont des capteurs, pas des
