@@ -6,6 +6,7 @@ on:
 
 jobs:
   # Tests de logique : ni toolchain AVR ni materiel requis.
+  # La suite couvre chaque source d'air et chaque variante de configuration structurante.
   native-tests:
     name: Tests natifs
     runs-on: ubuntu-latest
@@ -14,14 +15,28 @@ jobs:
       - name: Compiler et executer la suite de tests
         run: make -C test
 
-  # Compilation reelle du firmware pour la cible.
+  # Compilation reelle du firmware pour la cible, pour chaque transport MIDI et chaque
+  # variante de configuration. Une variante qui deborde la FLASH ou la SRAM doit se voir
+  # ici, et pas au moment du montage.
   firmware:
     name: Firmware (${{ matrix.environment }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        environment: [leonardo_din, leonardo_usb, leonardo_din_usb]
+        environment:
+          - leonardo_din
+          - leonardo_usb
+          - leonardo_din_usb
+          - bellow_servo
+          - blower_pwm
+          - blower_esc
+          - pump_onoff
+          - pressure_pi
+          - pump_regulated
+          - solenoid
+          - routing_split
+          - oe_per_pca
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -38,3 +53,16 @@ jobs:
         run: pip install --upgrade platformio
       - name: Compiler
         run: pio run -e ${{ matrix.environment }}
+
+  # Le configurateur genere config.h : une erreur de syntaxe dans app.js le rendrait
+  # inutilisable sans que rien d'autre ne le signale.
+  configurator:
+    name: Configurateur
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verifier la syntaxe de l'interface
+        run: node --check tools/configurator/app.js

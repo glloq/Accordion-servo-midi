@@ -347,19 +347,47 @@ void Instrument::update() {
 }
 
 // === GESTION DE LA DESACTIVATION DES PCA ===
-// Avec un OE partage, la valve generale est coupee en meme temps que les anches. On ne le
-// coupe donc que :
+// Couper l'OE rend l'instrument silencieux : les servos cessent de forcer et de grincer.
+// On ne le coupe que :
 //  - a l'etat READY uniquement (pendant la calibration la valve doit rester ouverte, et en
 //    defaut elle doit rester ouverte pour liberer la pression),
 //  - et PCA_DISABLE_DELAY apres la DERNIERE commande, pour laisser aux servos le temps
-//    d'atteindre leur position.
+//    d'atteindre leur position — la valve generale en particulier.
+
+#if PCA_OE_MODE == PCA_OE_PER_PCA
+// Un banc qui porte un organe de la source d'air doit rester alimente : couper la valve
+// generale la laisserait retomber, et couper le canal d'un ESC arreterait la turbine.
+static bool pcaCarriesAirOrgan(uint8_t index) {
+    (void)index;
+  #if AIR_VALVE_TYPE == AIR_VALVE_SERVO
+    if (index == VALVE_PCA_INDEX) return true;
+  #endif
+  #if AIR_SOURCE == AIR_SOURCE_BELLOW_SERVO
+    if (index == BELLOW_SERVO_PCA_INDEX) return true;
+  #endif
+  #if AIR_SOURCE == AIR_SOURCE_BLOWER_ESC
+    if (index == ESC_PCA_INDEX) return true;
+  #endif
+    return false;
+}
+#endif
+
 void Instrument::managePCA() {
     if (state != SYS_READY) return;
     if (getActiveNoteCount() != 0) return;
+    if ((millis() - servoController.getLastCommandTime()) <= PCA_DISABLE_DELAY) return;
 
-    if ((millis() - servoController.getLastCommandTime()) > PCA_DISABLE_DELAY) {
-        servoController.enableServos(false);
+#if PCA_OE_MODE == PCA_OE_PER_PCA
+    // C'est tout l'interet d'une broche OE par PCA : les bancs d'anches sont coupes, celui
+    // qui porte la valve generale reste alimente. Avec un OE partage, couper les anches
+    // coupait aussi la valve — d'ou son maintien sous tension et le bruit associe.
+    for (uint8_t i = 0; i < NUM_PCA_TOTAL; i++) {
+        if (pcaCarriesAirOrgan(i)) continue;
+        servoController.enableBank(i, false);
     }
+#else
+    servoController.enableServos(false);
+#endif
 }
 
 // === GESTION DE L'INACTIVITE DE LA SOURCE D'AIR ===

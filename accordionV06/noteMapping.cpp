@@ -37,18 +37,21 @@ const NoteConfig LEFT_HAND_MAPPING[NOTE_TABLE_SIZE(NUM_NOTES_LEFT)] NOTE_TABLE_S
 // Un NUM_NOTES_* faux ne provoque aucune erreur de compilation par lui-meme : il tronque
 // silencieusement la table (notes injouables) ou la deborde (lecture hors tableau).
 // =========================================================================================
+// Ces tableaux ne servent qu'a leur `sizeof`. Ils sont malgre tout places en FLASH : sans
+// cela, un tableau const sur AVR occuperait de la SRAM si l'editeur de liens ne l'eliminait
+// pas, ce qui n'est pas garanti selon les options de compilation.
 #if NUM_NOTES_RIGHT > 0
-namespace { const uint8_t rightRowCount[] = {RIGHT_HAND_NOTE_LIST(NOTE_COUNT_ONE)}; }
+namespace { const uint8_t rightRowCount[] NOTE_TABLE_STORAGE = {RIGHT_HAND_NOTE_LIST(NOTE_COUNT_ONE)}; }
 ACCORDION_STATIC_ASSERT(sizeof(rightRowCount) == NUM_NOTES_RIGHT,
                         NUM_NOTES_RIGHT_ne_correspond_pas_a_RIGHT_HAND_NOTE_LIST);
 #endif
 
 #if NUM_NOTES_LEFT > 0
-namespace { const uint8_t leftRowCount[] = {LEFT_HAND_NOTE_LIST(NOTE_COUNT_ONE)}; }
+namespace { const uint8_t leftRowCount[] NOTE_TABLE_STORAGE = {LEFT_HAND_NOTE_LIST(NOTE_COUNT_ONE)}; }
 ACCORDION_STATIC_ASSERT(sizeof(leftRowCount) == NUM_NOTES_LEFT,
                         NUM_NOTES_LEFT_ne_correspond_pas_a_LEFT_HAND_NOTE_LIST);
 #endif
 
-namespace { const uint8_t pcaRowCount[] = {PCA_ADDRESS_LIST}; }
+namespace { const uint8_t pcaRowCount[] NOTE_TABLE_STORAGE = {PCA_ADDRESS_LIST}; }
 ACCORDION_STATIC_ASSERT(sizeof(pcaRowCount) == NUM_PCA_TOTAL,
                         NUM_PCA_TOTAL_ne_correspond_pas_a_PCA_ADDRESS_LIST);

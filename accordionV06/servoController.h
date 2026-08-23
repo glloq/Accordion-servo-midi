@@ -30,10 +30,17 @@ public:
     void setRawDuty(uint8_t pcaAddress, uint8_t channel, uint16_t counts);
 
     // === SORTIES PWM (broche OE) ===
+    // Couper l'OE rend l'instrument silencieux : les servos cessent de forcer, les
+    // electroaimants retombent. Une commande envoyee ensuite reactive automatiquement le
+    // banc concerne — sans quoi elle partirait dans le vide.
     void enableServos(bool state);                    // Tous les PCA
-    void enableBank(uint8_t pcaIndex, bool state);    // Un seul PCA (PCA_OE_PER_PCA)
+    // Un seul banc. N'a d'effet separe qu'en PCA_OE_PER_PCA ; avec un OE partage, couper un
+    // banc reviendrait a tout couper, ce que la methode refuse de faire silencieusement.
+    void enableBank(uint8_t pcaIndex, bool state);
+    bool isBankEnabled(uint8_t pcaIndex) const;
 
-    bool isEnabled() const { return pcaEnabled; }
+    // Au moins une sortie est active.
+    bool isEnabled() const { return bankMask != 0; }
 
     // Date de la derniere commande envoyee. Permet a Instrument de ne couper l'OE qu'une
     // fois les servos arrives en position (la valve generale notamment).
@@ -46,13 +53,17 @@ public:
 
 private:
     Adafruit_PWMServoDriver pca[NUM_PCA_TOTAL];
-    bool pcaEnabled;           // Etat actuel des sorties (true = actives)
+    // Un bit par PCA : 1 = sorties actives. Avec un OE partage les bits bougent ensemble ;
+    // avec une broche par PCA ils sont independants, ce qui permet de couper les bancs
+    // d'anches en gardant alimente celui qui porte la valve generale.
+    uint16_t bankMask;
     uint32_t lastCommandTime;  // millis() de la derniere commande
     uint8_t missingMask;       // Bits des PCA n'ayant pas repondu au demarrage
     uint8_t consecutiveErrors; // Erreurs I2C consecutives en fonctionnement
 
     static bool probe(uint8_t address);          // Presence d'un composant a cette adresse
     static int8_t indexOfAddress(uint8_t address);
+    static void writeOePin(uint8_t pin, bool enabled); // OE est actif bas
     // Ecriture effective : compte les erreurs et horodate. Tous les setters y aboutissent.
     void write(uint8_t pcaAddress, uint8_t channel, uint16_t onCounts, uint16_t offCounts);
 };

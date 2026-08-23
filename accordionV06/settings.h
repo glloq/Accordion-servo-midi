@@ -37,6 +37,10 @@
 #if NUM_PCA_TOTAL < 1
 #error "Au moins un PCA9685 est necessaire pour piloter les actionneurs."
 #endif
+// ServoController suit l'etat des sorties dans un masque de 16 bits, un par PCA.
+#if NUM_PCA_TOTAL > 16
+#error "Plus de 16 PCA9685 : le masque d'etat des sorties ne suffit plus."
+#endif
 
 #if SERVO_MIN_PWM >= SERVO_MAX_PWM
 #error "SERVO_MIN_PWM doit etre strictement inferieur a SERVO_MAX_PWM."

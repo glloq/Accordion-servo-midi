@@ -7,7 +7,7 @@ static const uint8_t PCA_OE_PINS[NUM_PCA_TOTAL] = {PCA_OE_PIN_LIST};
 #endif
 
 ServoController::ServoController()
-    : pcaEnabled(true), lastCommandTime(0), missingMask(0), consecutiveErrors(0) {
+    : bankMask(0), lastCommandTime(0), missingMask(0), consecutiveErrors(0) {
     for (int i = 0; i < NUM_PCA_TOTAL; i++) {
         pca[i] = Adafruit_PWMServoDriver(PCA_TAB[i]);
     }
@@ -19,6 +19,15 @@ ServoController::ServoController()
 bool ServoController::probe(uint8_t address) {
     Wire.beginTransmission(address);
     return (Wire.endTransmission() == 0);
+}
+
+void ServoController::writeOePin(uint8_t pin, bool enabled) {
+    digitalWrite(pin, enabled ? LOW : HIGH); // OE est actif bas
+}
+
+bool ServoController::isBankEnabled(uint8_t pcaIndex) const {
+    if (pcaIndex >= NUM_PCA_TOTAL) return false;
+    return (bankMask & (uint16_t)(1UL << pcaIndex)) != 0;
 }
 
 int8_t ServoController::indexOfAddress(uint8_t address) {
@@ -33,17 +42,17 @@ bool ServoController::begin() {
     // recu leur premiere consigne.
 #if PCA_OE_MODE == PCA_OE_SHARED
     pinMode(PCA_OE_PIN, OUTPUT);
-    digitalWrite(PCA_OE_PIN, HIGH); // OE actif bas
-    pcaEnabled = false;
+    writeOePin(PCA_OE_PIN, false);
+    bankMask = 0;
 #elif PCA_OE_MODE == PCA_OE_PER_PCA
     for (int i = 0; i < NUM_PCA_TOTAL; i++) {
         pinMode(PCA_OE_PINS[i], OUTPUT);
-        digitalWrite(PCA_OE_PINS[i], HIGH);
+        writeOePin(PCA_OE_PINS[i], false);
     }
-    pcaEnabled = false;
+    bankMask = 0;
 #else
     // OE cable a la masse : les sorties sont toujours actives, il n'y a rien a piloter.
-    pcaEnabled = true;
+    bankMask = (uint16_t)~0u;
 #endif
 
     missingMask = 0;
@@ -75,12 +84,12 @@ bool ServoController::begin() {
 // cours de jeu laisserait sinon des anches ouvertes sans que rien ne le signale.
 void ServoController::write(uint8_t pcaAddress, uint8_t channel, uint16_t onCounts,
                             uint16_t offCounts) {
-    if (!pcaEnabled) {
-        enableServos(true); // Reactive les sorties si elles avaient ete coupees
-    }
-
     int8_t index = indexOfAddress(pcaAddress);
     if (index < 0) return; // Adresse absente de la configuration : rien a piloter
+
+    // Reactive le banc concerne s'il avait ete coupe : sans cela la commande partirait dans
+    // le vide, et l'anche resterait fermee sans que rien ne le signale.
+    if (!isBankEnabled((uint8_t)index)) enableBank((uint8_t)index, true);
 
     uint8_t result = pca[index].setPWM(channel, onCounts, offCounts);
     if (result != 0) {
@@ -114,33 +123,36 @@ void ServoController::setRawDuty(uint8_t pcaAddress, uint8_t channel, uint16_t c
 
 // === SORTIES PWM (OE) ===
 void ServoController::enableServos(bool state) {
+    // 1UL et non 1u : sur AVR un `unsigned int` fait 16 bits, et decaler de 16 y est
+    // un comportement indefini.
+    uint16_t wanted = state ? (uint16_t)((1UL << NUM_PCA_TOTAL) - 1UL) : 0u;
+
 #if PCA_OE_MODE == PCA_OE_NONE
-    (void)state; // Rien a piloter : l'OE est cable a la masse
+    (void)wanted; // Rien a piloter : l'OE est cable a la masse, les sorties restent actives
 #else
-    if (pcaEnabled == state) return; // Evite les changements inutiles
+    if (bankMask == wanted) return; // Evite les ecritures inutiles
 
   #if PCA_OE_MODE == PCA_OE_SHARED
-    digitalWrite(PCA_OE_PIN, state ? LOW : HIGH); // OE est actif bas
+    writeOePin(PCA_OE_PIN, state);
   #else
-    for (int i = 0; i < NUM_PCA_TOTAL; i++) {
-        digitalWrite(PCA_OE_PINS[i], state ? LOW : HIGH);
-    }
+    for (int i = 0; i < NUM_PCA_TOTAL; i++) writeOePin(PCA_OE_PINS[i], state);
   #endif
-    pcaEnabled = state;
+    bankMask = wanted;
 #endif
 }
 
 void ServoController::enableBank(uint8_t pcaIndex, bool state) {
-#if PCA_OE_MODE == PCA_OE_PER_PCA
     if (pcaIndex >= NUM_PCA_TOTAL) return;
-    digitalWrite(PCA_OE_PINS[pcaIndex], state ? LOW : HIGH);
-    // pcaEnabled decrit l'etat d'ensemble : des qu'un banc est actif, une commande peut
-    // partir sans reactivation globale.
-    if (state) pcaEnabled = true;
+
+#if PCA_OE_MODE == PCA_OE_PER_PCA
+    uint16_t bit = (uint16_t)(1UL << pcaIndex);
+    if (((bankMask & bit) != 0) == state) return;
+    writeOePin(PCA_OE_PINS[pcaIndex], state);
+    if (state) bankMask |= bit; else bankMask &= (uint16_t)~bit;
 #else
-    // Sans broche par PCA, couper un banc seul est impossible : la demande porte donc sur
-    // l'ensemble. Le documenter vaut mieux que l'ignorer silencieusement.
-    (void)pcaIndex;
+    // Sans broche par PCA, couper un banc seul est physiquement impossible : la demande
+    // porte forcement sur l'ensemble. C'est aussi pour cela que couper l'OE partage coupe
+    // la valve generale en meme temps que les anches.
     enableServos(state);
 #endif
 }

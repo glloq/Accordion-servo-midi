@@ -45,7 +45,8 @@ BINARIES = \
 	$(addprefix $(BUILD_DIR)/test_air_,$(AIR_SOURCE_VARIANTS)) \
 	$(BUILD_DIR)/test_variant_split \
 	$(BUILD_DIR)/test_variant_merge \
-	$(BUILD_DIR)/test_variant_solenoid
+	$(BUILD_DIR)/test_variant_solenoid \
+	$(BUILD_DIR)/test_variant_oe_per_pca
 
 .PHONY: all test clean
 all: test
@@ -108,6 +109,9 @@ $(BUILD_DIR)/test_variant_merge: test_variants.cpp $(STUB_SRC) $(FIRMWARE_SRC) |
 
 $(BUILD_DIR)/test_variant_solenoid: test_variants.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -DNOTE_ACTUATOR=ACTUATOR_SOLENOID $(INCLUDES) $^ -o $@
+
+$(BUILD_DIR)/test_variant_oe_per_pca: test_variants.cpp $(STUB_SRC) $(FIRMWARE_SRC) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -DPCA_OE_MODE=PCA_OE_PER_PCA $(INCLUDES) $^ -o $@
 
 # === REGULATION DE PRESSION ===
 # Le capteur n'est pas monte sur la machine par defaut : le test l'active explicitement.

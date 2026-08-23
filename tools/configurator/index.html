@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configurateur Accordion-servo-midi</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>Configurateur Accordion-servo-midi</h1>
+    <p>Genere <code>accordionV06/config.h</code> : source d'air, actionneurs, MIDI, tables de notes.</p>
+  </div>
+  <div class="summary" id="summary"></div>
+</header>
+
+<div class="layout">
+
+  <nav id="nav" aria-label="Sections"></nav>
+
+  <main>
+
+    <section class="intro">
+      <h2>Comment s'en servir</h2>
+      <ol>
+        <li>Choisir la <strong>source d'air</strong> : seuls les reglages du systeme retenu restent affiches.</li>
+        <li>Renseigner les actionneurs, le MIDI et les <strong>tables de notes</strong>.</li>
+        <li>Corriger les erreurs signalees en bas de page — ce sont celles qui empechent le firmware
+            de compiler, ou celles qu'un <code>#if</code> ne sait pas detecter.</li>
+        <li>Telecharger <code>config.h</code> et le deposer dans <code>accordionV06/</code>,
+            puis <code>pio run</code> ou compiler depuis l'IDE Arduino.</li>
+      </ol>
+      <p class="muted">
+        Page autonome : aucun reseau, aucune dependance. Le travail en cours est conserve dans le
+        navigateur, et le bouton « Profil JSON » permet de l'archiver ou de le transmettre.
+        Un <code>config.h</code> existant peut etre relu depuis la section <em>Fichier genere</em>.
+      </p>
+    </section>
+
+    <div id="sections"></div>
+
+    <section id="sec_notes">
+      <h2>Tables de notes</h2>
+      <p class="section-doc">Une ligne par anche pilotee. Le numero de note MIDI est explicite : la
+disposition Stradella de la main gauche n'est pas chromatique, aucune continuite n'est supposee.
+Le debit d'air est relatif — une anche grave consomme davantage — et sert a calculer la demande
+envoyee a la source d'air.</p>
+
+      <div id="notes-host"></div>
+
+      <h3>Occupation des canaux PCA9685</h3>
+      <p class="section-doc">Chaque case est un canal. La valve generale, le servo de soufflet et
+le canal ESC occupent un canal au meme titre qu'une anche : un conflit apparait en rouge.</p>
+      <div class="legend">
+        <span><i class="sw right"></i> main droite</span>
+        <span><i class="sw left"></i> main gauche</span>
+        <span><i class="sw special"></i> organe de la source d'air</span>
+        <span><i class="sw free"></i> libre</span>
+        <span><i class="sw clash"></i> conflit</span>
+      </div>
+      <div id="channelmap"></div>
+    </section>
+
+    <section id="sec_output">
+      <h2>Fichier genere</h2>
+      <p class="section-doc">Remplacant complet de <code>accordionV06/config.h</code>. Les blocs des
+sources d'air non selectionnees y figurent aussi : changer de systeme plus tard ne demande pas de
+tout reecrire.</p>
+
+      <div class="toolbar">
+        <button type="button" id="btn-copy">Copier config.h</button>
+        <button type="button" id="btn-download">Telecharger config.h</button>
+        <button type="button" id="btn-json">Telecharger le profil JSON</button>
+        <button type="button" id="btn-reset" class="danger">Revenir aux valeurs du depot</button>
+      </div>
+      <p class="muted">Le telechargement de <code>config.h</code> est desactive tant qu'une erreur
+      subsiste. Le bouton « Copier » reste disponible pour inspecter le resultat.</p>
+
+      <textarea id="output" readonly spellcheck="false" aria-label="config.h genere"></textarea>
+
+      <h3>Repartir d'une configuration existante</h3>
+      <p class="section-doc">Coller un profil JSON ou un <code>config.h</code> deja ecrit. La
+relecture est tolerante : ce qui n'est pas reconnu garde sa valeur par defaut, et le compte de ce
+qui a ete lu est affiche.</p>
+      <div class="toolbar">
+        <button type="button" id="btn-import">Relire le contenu colle</button>
+        <label class="filebtn">Choisir un fichier<input type="file" id="btn-file" accept=".h,.json,.txt"></label>
+      </div>
+      <textarea id="importbox" spellcheck="false" placeholder="Coller ici un profil JSON ou un fichier config.h..."
+                aria-label="Configuration a relire"></textarea>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <h2>Verifications</h2>
+  <div id="messages"></div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

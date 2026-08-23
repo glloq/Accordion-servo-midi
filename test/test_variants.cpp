@@ -2,7 +2,8 @@
 // Tests des variantes de configuration structurantes autres que la source d'air.
 //
 // Compile plusieurs fois avec des definitions differentes (voir le Makefile) : routage MIDI
-// par point de partage, routage fusionne, actionneurs a electroaimant. Ces options changent
+// par point de partage, routage fusionne, actionneurs a electroaimant, une broche OE par
+// PCA. Ces options changent
 // du code compile conditionnellement — les tester une seule fois dans la configuration par
 // defaut reviendrait a ne pas les tester du tout.
 // =========================================================================================
@@ -141,8 +142,53 @@ static void run() {
     check("MIDI Panic referme tout", inst.getActiveNoteCount() == 0);
 }
 
+// -----------------------------------------------------------------------------------------
+#elif PCA_OE_MODE == PCA_OE_PER_PCA
+// -----------------------------------------------------------------------------------------
+static const char *SUITE = "test_variant_oe_par_pca";
+
+static const uint8_t OE_PINS[NUM_PCA_TOTAL] = {PCA_OE_PIN_LIST};
+
+static void run() {
+    printf("\n=== OE par PCA : couper les anches sans couper la valve ===\n");
+    Instrument inst;
+    bringUp(inst);
+    check("instrument pret", inst.getState() == SYS_READY);
+
+    // Au repos, les bancs d'anches sont coupes : les servos cessent de forcer et de
+    // grincer. C'est tout l'interet du cablage separe — avec un OE partage, la valve
+    // generale etait coupee en meme temps et retombait de sa position.
+    runLoop(inst, PCA_DISABLE_DELAY + 500);
+    bool anchesCut = true;
+    for (int i = 0; i < NUM_PCA_TOTAL; i++) {
+        if (i == VALVE_PCA_INDEX) continue;
+        if (stubPinState[OE_PINS[i]] != HIGH) anchesCut = false;
+    }
+    check("bancs d'anches coupes au repos", anchesCut);
+    check("banc de la valve generale toujours alimente",
+          stubPinState[OE_PINS[VALVE_PCA_INDEX]] == LOW);
+
+    // Une commande envoyee a un banc coupe doit le reactiver : sinon elle partirait dans le
+    // vide et l'anche resterait fermee sans que rien ne le signale.
+    // La note 60 est sur le premier PCA, la note 72 sur le deuxieme.
+    inst.noteOn(60, 100, MIDI_CHANNEL_RIGHT);
+    runLoop(inst, 50);
+    check("le banc de la note jouee se reactive",
+          stubPinState[OE_PINS[0]] == LOW && inst.getActiveNoteCount() == 1);
+    check("les bancs sans note active restent coupes", stubPinState[OE_PINS[1]] == HIGH);
+
+    inst.noteOn(72, 100, MIDI_CHANNEL_RIGHT);
+    runLoop(inst, 50);
+    check("un second banc se reactive a son tour",
+          stubPinState[OE_PINS[1]] == LOW && inst.getActiveNoteCount() == 2);
+
+    inst.allNotesOff();
+    runLoop(inst, 50);
+    check("MIDI Panic referme tout", inst.getActiveNoteCount() == 0);
+}
+
 #else
-#error "test_variants doit etre compile avec une variante explicite (routage ou actionneur)."
+#error "test_variants doit etre compile avec une variante explicite (routage, actionneur, OE)."
 #endif
 
 int main() {
